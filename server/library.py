@@ -7,14 +7,12 @@ import re
 import threading
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from PIL import Image
-
 from server import photos
 from server.atlas import Atlas
 from server.cache import connect, preview_path, thumbnail_path, while_open
 from server.groups import Groups
 from server.layout import Layout
-from server.scanner import FolderUnavailable, ScanCancelled, Scanner, scaled
+from server.scanner import FolderUnavailable, ScanCancelled, Scanner, open_image, scaled
 from server.semantic import SemanticIndex
 
 PAGE_SIZE = 80
@@ -314,7 +312,7 @@ class Library:
         preview = preview_path(self.directory, image_id)
         if not preview.is_file():
             preview.parent.mkdir(exist_ok=True)
-            with Image.open(path) as source:
+            with path.open('rb') as stream, open_image(stream, path.name) as source:
                 image = scaled(source, PREVIEW_EDGE)
                 temporary = preview.with_suffix(f'.{threading.get_ident()}.tmp')
                 (image.convert('RGB') if image.mode == 'RGBA' else image).save(temporary, 'JPEG', quality=90)

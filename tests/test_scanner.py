@@ -12,6 +12,7 @@ import warnings
 
 from PIL import Image
 
+from server import raw
 from server.cache import connect, thumbnail_path
 from server.scanner import Budget, FolderUnavailable, Scanner, exif_details, walk
 
@@ -61,15 +62,20 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(stats['photo_libraries'], ['a/Photos Library.photoslibrary'])
         self.assertGreaterEqual(stats['listed_seconds'], 0)
 
-    def test_raw_photos_and_videos_are_counted_as_skipped_not_unreadable(self):
+    def test_videos_are_counted_as_skipped_and_raw_photos_are_read_when_rawpy_is_installed(self):
         picture(self.root / 'kept.jpg')
         for name in ('a/IMG_1.CR3', 'a/IMG_2.nef', 'DSC_3.dng', 'clip.MOV', 'b/film.mp4', '.hidden/raw.arw'):
             (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             (self.root / name).write_bytes(b'not decoded')
         stats = self.scanner.scan()
-        self.assertEqual(set(self.files()), {'kept.jpg'})
-        self.assertEqual(stats['unreadable'], 0)
-        self.assertEqual(stats['skipped'], {'raw': 3, 'video': 2})
+        if raw.available():
+            # These aren't real RAW files, so they are listed and found unreadable.
+            self.assertEqual(set(self.files()), {'kept.jpg', 'a/IMG_1.CR3', 'a/IMG_2.nef', 'DSC_3.dng'})
+            self.assertEqual(self.files()['DSC_3.dng']['error'], 'Not a readable image')
+            self.assertEqual((stats['unreadable'], stats['skipped']), (3, {'raw': 0, 'video': 2}))
+        else:
+            self.assertEqual(set(self.files()), {'kept.jpg'})
+            self.assertEqual((stats['unreadable'], stats['skipped']), (0, {'raw': 3, 'video': 2}))
 
     @unittest.skipIf(sys.platform == 'win32', 'Symlinks need Developer Mode on Windows')
     def test_symlink_loops_end_and_real_paths_win(self):

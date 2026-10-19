@@ -17,6 +17,7 @@ import warnings
 
 from PIL import ExifTags, Image, ImageOps, UnidentifiedImageError
 
+from server import raw
 from server.cache import connect, preview_path, thumbnail_path, while_open
 
 try:
@@ -26,12 +27,14 @@ except ImportError:
     pass
 
 EXTENSIONS = {'.jpg', '.jpeg', '.jpe', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.avif'}
+RAW = raw.EXTENSIONS
+# RAW photos are read through their embedded JPEG when rawpy is installed (server/raw.py).
+if raw.available():
+    EXTENSIONS |= RAW
 # Photos and videos in formats the scanner can't read. They are only counted, so a folder of them doesn't look empty
 # for no reason.
-RAW = {'.3fr', '.arw', '.cr2', '.cr3', '.crw', '.dcr', '.dng', '.erf', '.fff', '.iiq', '.kdc', '.mef', '.mos', '.mrw',
-       '.nef', '.nrw', '.orf', '.pef', '.raf', '.raw', '.rw2', '.rwl', '.sr2', '.srf', '.srw', '.x3f'}
 VIDEO = {'.3gp', '.avi', '.flv', '.m2ts', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg', '.mts', '.webm', '.wmv'}
-SKIPPED = {**dict.fromkeys(RAW, 'raw'), **dict.fromkeys(VIDEO, 'video')}
+SKIPPED = {**dict.fromkeys(RAW - EXTENSIONS, 'raw'), **dict.fromkeys(VIDEO, 'video')}
 THUMBNAIL_SIZE = 720
 # Anything larger is refused as a possible decompression bomb, by refuse_oversized.
 Image.MAX_IMAGE_PIXELS = 300_000_000
@@ -151,10 +154,11 @@ def utc(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-def exif_details(image):
-    """When the photo was taken, and the camera, from EXIF. Either may be None."""
+def exif_details(image, exif=None):
+    """When the photo was taken, and the camera, from EXIF: the image's own, or `exif` when given. Either may be
+    None."""
     try:
-        exif = image.getexif()
+        exif = exif if exif is not None else image.getexif()
         detail = exif.get_ifd(ExifTags.IFD.Exif)
     except Exception:
         return None, None
@@ -228,6 +232,11 @@ def scaled(image, edge: int):
     with DECODING.hold(image.width * image.height * PIXEL_BYTES):
         image.thumbnail((edge, edge))
     return displayable(ImageOps.exif_transpose(image))
+
+
+def open_image(stream, name: str):
+    """Open an image file for Pillow, reading a RAW file through its embedded JPEG."""
+    return raw.open_raw(stream) if raw.is_raw(name) else Image.open(stream)
 
 
 def failure(error: Exception) -> str:
@@ -333,22 +342,23 @@ class Scanner:
                 if digest in self._seen:
                     return {'id': digest}
                 stream.seek(0)
-                return self._describe(stream, digest)
+                return self._describe(stream, digest, relative)
         except Exception as error:
             logger.info('Could not read %s: %s', relative, error)
             return {'error': failure(error)}
 
-    def _describe(self, stream, digest: str) -> dict:
+    def _describe(self, stream, digest: str, name: str = '') -> dict:
         """Read a new image's metadata and draw its thumbnail."""
-        with Image.open(stream) as image:
-            mime = Image.MIME.get(image.format or '', 'application/octet-stream')
+        is_raw = raw.is_raw(name)
+        with open_image(stream, name) as image:
+            mime = raw.MIME if is_raw else Image.MIME.get(image.format or '', 'application/octet-stream')
             refuse_oversized(image)
-            width, height = image.size
+            width, height = image.info.get('raw_size', image.size)
             # Drawn before the EXIF is read, since reading a PNG's EXIF decodes the whole image.
             display = scaled(image, THUMBNAIL_SIZE)
             if image.getexif().get(ExifTags.Base.Orientation) in (5, 6, 7, 8):
                 width, height = height, width
-            taken, camera = exif_details(image)
+            taken, camera = exif_details(image, raw.exif(stream) if is_raw else None)
             target = thumbnail_path(self.directory, digest)
             temporary = target.with_suffix(f'.{os.getpid()}-{id(display)}.tmp')
             display.save(temporary, 'WEBP', quality=82)
