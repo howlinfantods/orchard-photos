@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Copy, Download, FolderOpen, Images, ScanSearch, X, ZoomIn, ZoomOut } from 'lucide-react';
-import type { Details, Filters, Picture, Results } from './types';
+import type { CatalogMeta, Details, Filters, Picture, Results, SourceKind } from './types';
 import { Disclosure } from './Panels';
 import { FilmPanel, filmUrl, useFilm, useLook } from './FilmLook';
 import { dateLabel, downloadUrl, fileName, filterParams, folderOf, imageUrl, plural, post, request, sizeLabel, typeLabel } from './types';
@@ -9,6 +9,8 @@ interface Props {
   items: Picture[]; index: number; total: number; hasMore: boolean; loadingMore: boolean; pageError: string; rootName: string; platform: string; filters: Filters;
   /** The Photos library has no folders, and its photos are shown in Photos rather than Finder. */
   photos: boolean;
+  /** A Photos library bundle has no folders either, but its photos are shown in Finder or the file manager. */
+  kind: SourceKind;
   onChange: (index: number) => void; onClose: () => void; onSimilar: ((id: string) => void) | null; onFolder: (folder: string) => void;
 }
 // The deepest folders name a place; the rest of a long path is in the tooltip and under Details.
@@ -16,7 +18,7 @@ const CRUMBS = 3;
 // Browsers refuse canvases much larger than this.
 const CLIPBOARD_PIXELS = 50_000_000;
 
-export default function Viewer({ items, index, total, hasMore, loadingMore, pageError, rootName, platform, filters, photos, onChange, onClose, onSimilar, onFolder }: Props) {
+export default function Viewer({ items, index, total, hasMore, loadingMore, pageError, rootName, platform, filters, photos, kind, onChange, onClose, onSimilar, onFolder }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [details, setDetails] = useState<Details | null>(null);
   const [error, setError] = useState('');
@@ -31,7 +33,7 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
   const [developing, setDeveloping] = useState(false);
   const front = items[index];
   const item = members[shown] ?? front;
-  const folder = photos ? '' : folderOf(item.path);
+  const folder = photos || kind === 'bundle' ? '' : folderOf(item.path);
   const reveal = photos ? 'Show in Photos' : platform === 'darwin' ? 'Show in Finder' : 'Show in folder';
   const RevealIcon = photos ? Images : FolderOpen;
   useEffect(() => {
@@ -108,6 +110,7 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
           <p>{item.dated === 'taken' ? 'Taken' : 'Modified'} {dateLabel(item.date, true)}</p>
           <button className="crumbs" title={`${folder || rootName}. Show only this folder`} onClick={() => onFolder(folder)}>{crumbs}</button>
           <p className="numbers">{item.width.toLocaleString()} × {item.height.toLocaleString()} · {sizeLabel(item.size)} · {typeLabel(item.mime)}</p>
+          {file?.catalog && <CatalogInfo meta={file.catalog} kind={kind} />}
           {filmOn ? <p>Developed from the original through {film?.stocks?.find(stock => stock.id === look.stock)?.name ?? look.stock}.</p> : details?.preview && <p>{item.mime === 'image/x-raw' ? 'Shown through the preview the camera stored in it.' : 'Shown as a converted preview.'} Download for the original {typeLabel(item.mime)}.</p>}
         </div>
         <div className="detail-actions">
@@ -123,14 +126,29 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
           <ul>{members.map((member, place) => <li key={member.id}><button aria-pressed={place === shown} aria-label={`Show ${fileName(member.path)}`} title={member.path} onClick={() => setShown(place)}><img src={imageUrl(member.id)} alt="" decoding="async" /></button></li>)}</ul>
         </section>}
         {details && <Disclosure summary="Details">
-          <p className="path">{photos ? `In your ${details.root} library` : `${details.root}/${item.path}`}</p>
+          <p className="path">{photos ? `In your ${details.root} library` : kind === 'bundle' ? `In ${details.root}` : file?.catalog?.origin || `${details.root}/${item.path}`}</p>
           {otherDate && <p>{otherDate}</p>}
+          {file?.catalog?.captured && <p>Captured {dateLabel(file.catalog.captured, true)}</p>}
           {details.camera && <p>{details.camera}</p>}
           {!!others.length && <><p>Also saved in {plural(others.length, 'other place')}</p><ul className="file-list">{others.map(other => <li key={other.path}><span className="path">{photos ? fileName(other.path) : other.path}</span><button className="icon-button" aria-label={`${reveal}: ${photos ? fileName(other.path) : other.path}`} title={reveal} onClick={() => show(other.path)}><RevealIcon /></button></li>)}</ul></>}
         </Disclosure>}
       </aside>
     </div>
   </dialog>;
+}
+
+const stars = (count: number) => '★'.repeat(count) + '☆'.repeat(5 - count);
+
+/** What a Lightroom catalog or a Photos library says about a file: its rating, flag, label, keywords and collections or albums. */
+function CatalogInfo({ meta, kind }: { meta: CatalogMeta; kind: SourceKind }) {
+  const flags = [meta.pick === 1 && 'Picked', meta.pick === -1 && 'Rejected', meta.favorite && 'Favorite', meta.label].filter(Boolean);
+  return <div className="catalog-info">
+    {kind === 'catalog' && <p className="numbers" title={`${meta.rating} of 5 stars`}>{stars(meta.rating)}</p>}
+    {!!flags.length && <p>{flags.join(' · ')}</p>}
+    {!!meta.keywords.length && <p>Keywords: {meta.keywords.join(', ')}</p>}
+    {!!meta.collections.length && <p>{kind === 'bundle' ? 'Albums' : 'Collections'}: {meta.collections.join(', ')}</p>}
+    {meta.fromPreview && <p>Shown from Lightroom’s preview, because the original isn’t on this computer.</p>}
+  </div>;
 }
 
 /** The image as a PNG, the one format every browser can put on the clipboard, scaled down only past what a canvas holds. */

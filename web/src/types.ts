@@ -4,12 +4,18 @@ export const APP_NAME = app.name;
 export type SearchMode = 'name' | 'visual';
 export type View = 'grid' | 'map';
 export type Range = 'all' | 'today' | '7d' | '28d' | 'year' | 'custom';
-export interface Filters { folder: string; type: string; range: Range; from: string; to: string }
+/** `rating` is the fewest stars (0 for any), `picks` keeps flagged files (favorites, in Photos), and `keyword` and `collection`
+ *  name one each. The last four only mean something for a Lightroom catalog or a Photos library file. */
+export interface Filters { folder: string; type: string; range: Range; from: string; to: string; rating: number; picks: boolean; keyword: string; collection: string }
 /** One image, described by its newest file that passes the filters. `dated` says where its date came from.
  *  In the grid it fronts its `group` of near-duplicates, `members` images in all, counting itself. */
 export interface Picture { id: string; width: number; height: number; mime: string; size: number; date: string; dated: 'taken' | 'modified'; path: string; copies: number; group: string; members: number }
-interface FileCopy { path: string; modified: string }
-export interface Details { id: string; width: number; height: number; mime: string; size: number; taken: string | null; camera: string | null; root: string; source: 'folder' | 'photos'; files: FileCopy[]; preview: boolean }
+/** What a Lightroom catalog or a Photos library says about a file. `pick` is 1 flagged, -1 rejected; `origin` is the original's
+ *  path, and `fromPreview` says it is missing and Lightroom's preview of it is shown. */
+export interface CatalogMeta { rating: number; pick: number; favorite: boolean; label: string | null; captured: string | null; fromPreview: boolean; origin: string; keywords: string[]; collections: string[] }
+interface FileCopy { path: string; modified: string; catalog?: CatalogMeta | null }
+export type SourceKind = 'folder' | 'photos' | 'catalog' | 'bundle';
+export interface Details { id: string; width: number; height: number; mime: string; size: number; taken: string | null; camera: string | null; root: string; source: SourceKind; files: FileCopy[]; preview: boolean }
 /** `received` and `size` are bytes, sent while the model downloads. */
 export interface SearchStatus { state: 'idle' | 'downloading' | 'loading' | 'indexing' | 'ready' | 'error'; indexed: number; total: number; downloaded: boolean; received?: number; size?: number; error?: string }
 /** Visual queries can be answered: some images are prepared. */
@@ -21,9 +27,12 @@ export interface Scan { state: 'ready' | 'scanning' | 'error'; found?: number; d
 export interface LibraryStatus {
   counts: { images: number; files: number; duplicates: number; nearDuplicates: number; unreadable: number };
   unlistedFolders: number; photoLibraries: string[]; skipped: { raw?: number; video?: number }; scan: Scan; search: SearchStatus; updated?: string; revision: number;
+  /** A catalog says when it shows a snapshot, and `fromPreview` counts files shown from Lightroom's previews. */
+  notice: string | null; fromPreview: number;
 }
-/** `photos` says this is the Mac's Photos library, read through Photos rather than as files. */
-export interface Folder { path: string; label: string; name: string; id: string; photos: boolean }
+/** `photos` says this is the Mac's Photos library, read through Photos rather than as files. `kind` also tells a Lightroom
+ *  catalog and a Photos library bundle from a folder. */
+export interface Folder { path: string; label: string; name: string; id: string; photos: boolean; kind: SourceKind }
 interface RecentFolder { path: string; label: string; available: boolean }
 /** The visual search model, shared by every folder. `present` says it is downloaded or on its way, and `size` is its
  *  download in bytes. */
@@ -34,12 +43,13 @@ export const SET_UP = 'Set up visual search';
 export interface Status { app: string; version: string; platform: string; picker: boolean; model: Model; folder: Folder | null; library: LibraryStatus | null; recent: RecentFolder[]; photos: string | null }
 /** The opt-in check for a newer release, and the release it found, if any. */
 export interface Updates { enabled: boolean; update: { version: string; url: string } | null }
-export interface Facets { folders: { path: string; count: number }[]; types: { mime: string; count: number }[] }
+export interface CatalogFacets { kind: SourceKind; ratings: { rating: number; count: number }[]; picks: number; keywords: { name: string; count: number }[]; collections: { name: string; count: number }[] }
+export interface Facets { folders: { path: string; count: number }[]; types: { mime: string; count: number }[]; catalog: CatalogFacets | null }
 /** How many tiles of the date-ordered grid fall in each month (`YYYY-MM`), newest first. */
 export interface Timeline { months: { month: string; count: number }[]; total: number }
 export interface Results { items: Picture[]; total: number; offset: number; hasMore: boolean }
 
-export const defaults: Filters = { folder: '', type: '', range: 'all', from: '', to: '' };
+export const defaults: Filters = { folder: '', type: '', range: 'all', from: '', to: '', rating: 0, picks: false, keyword: '', collection: '' };
 export const RANGES: { range: Range; label: string; days?: number }[] = [{ range: 'today', label: 'Today', days: 1 }, { range: '7d', label: 'Past 7 days', days: 7 }, { range: '28d', label: 'Past 28 days', days: 28 }, { range: 'year', label: 'Past year', days: 365 }, { range: 'all', label: 'All' }, { range: 'custom', label: 'Custom range' }];
 const localDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 /** The dates a filter selects. Presets are relative to now, so they stay correct when the app is left open. */
@@ -49,12 +59,15 @@ function dateBounds({ range, from, to }: Filters) {
   const start = new Date(); start.setDate(start.getDate() - days + 1);
   return { from: localDay(start), to: '' };
 }
-export const filterParams = (filters: Filters) => ({ folder: filters.folder, type: filters.type, ...dateBounds(filters), tz: String(-new Date().getTimezoneOffset()) });
+export const filterParams = (filters: Filters) => ({ folder: filters.folder, type: filters.type, ...dateBounds(filters), tz: String(-new Date().getTimezoneOffset()),
+  rating: filters.rating ? String(filters.rating) : '', picks: filters.picks ? '1' : '', keyword: filters.keyword, collection: filters.collection });
 export function rangeLabel(filters: Filters) {
   if (filters.range !== 'custom') return RANGES.find(r => r.range === filters.range && r.days)?.label || '';
   return filters.from && filters.to ? `${dateLabel(filters.from)} – ${dateLabel(filters.to)}` : filters.from ? `From ${dateLabel(filters.from)}` : filters.to ? `Until ${dateLabel(filters.to)}` : '';
 }
-export const isFiltered = (filters: Filters) => !!filters.folder || !!filters.type || filters.range !== 'all';
+export const isFiltered = (filters: Filters) => !!filters.folder || !!filters.type || filters.range !== 'all' || !!filters.rating || filters.picks || !!filters.keyword || !!filters.collection;
+/** The catalog filters in words, like "4+ stars", for the line under the title. */
+export const catalogLabels = (filters: Filters, kind?: SourceKind) => [filters.rating && `${filters.rating}+ stars`, filters.picks && (kind === 'bundle' ? 'Favorites' : 'Picks'), filters.keyword && `keyword ${filters.keyword}`, filters.collection && (kind === 'bundle' ? `album ${filters.collection}` : `collection ${filters.collection}`)].filter(Boolean) as string[];
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
@@ -79,7 +92,8 @@ export function readPreferences(): Preferences {
     const text = (s: unknown) => typeof s === 'string' ? s : '';
     const validDate = (s: unknown) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
     const custom = validDate(f.from) || validDate(f.to);
-    const filters: Filters = { folder: text(f.folder), type: text(f.type), range: RANGES.some(r => r.range === f.range && r.range !== 'all') ? f.range : custom ? 'custom' : 'all', from: validDate(f.from), to: validDate(f.to) };
+    const filters: Filters = { folder: text(f.folder), type: text(f.type), range: RANGES.some(r => r.range === f.range && r.range !== 'all') ? f.range : custom ? 'custom' : 'all', from: validDate(f.from), to: validDate(f.to),
+      rating: Number.isInteger(f.rating) && f.rating >= 1 && f.rating <= 5 ? f.rating : 0, picks: f.picks === true, keyword: text(f.keyword), collection: text(f.collection) };
     if (filters.from && filters.to && filters.from > filters.to) { filters.from = ''; filters.to = ''; }
     return { filters, theme: ['light', 'dark'].includes(saved.theme) ? saved.theme : theme, view: saved.view === 'map' ? 'map' : 'grid', root: text(saved.root) };
   } catch { return { filters: defaults, theme, view: 'grid', root: '' }; }

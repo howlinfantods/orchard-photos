@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image
 
-from server import film, photos, raw
+from server import catalog, film, photos, raw
 from server.atlas import Atlas
 from server.cache import connect, preview_path, thumbnail_path, while_open
 from server.groups import Groups
@@ -40,11 +40,23 @@ def utc_offset(params) -> int:
 
 
 class Library:
-    def __init__(self, folder: Path, directory: Path, encoder):
+    def __init__(self, folder: Path, directory: Path, encoder, path_map=()):
         self.folder = Path(folder)
         self.directory = Path(directory)
-        self.photos = photos.is_library(self.folder)
-        self.scanner = Scanner(self.folder, self.directory, photos.PhotosLibrary(self.directory) if self.photos else None)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        # `photos` is the Mac's Photos library, read through Photos. Any other Photos library, and a Lightroom catalog, are
+        # read from a copy of their database, and what they know about each file is kept for the filters.
+        self.photos = photos.is_library(self.folder) and self.folder == photos.LIBRARY and photos.available()
+        if self.photos:
+            self.kind, source = 'photos', photos.PhotosLibrary(self.directory)
+        elif catalog.is_catalog(self.folder):
+            self.kind, source = 'catalog', catalog.LightroomCatalog(self.folder, self.directory, path_map)
+        elif photos.is_library(self.folder):
+            self.kind, source = 'bundle', catalog.PhotosBundle(self.folder, self.directory)
+        else:
+            self.kind, source = 'folder', None
+        catalog.prepare(self.directory)
+        self.scanner = Scanner(self.folder, self.directory, source)
         self.semantic = SemanticIndex(self.directory, encoder)
         self.atlas = Atlas(self.directory)
         self.layout = Layout(self.semantic)
@@ -128,6 +140,7 @@ class Library:
         return {'counts': {'images': images, 'files': files, 'duplicates': files - images, 'nearDuplicates': near, 'unreadable': unreadable_count},
                 'unlistedFolders': self.stats.get('unlisted_folders', 0),
                 'photoLibraries': self.stats.get('photo_libraries', []), 'skipped': self.stats.get('skipped', {}),
+                'notice': self.stats.get('notice'), 'fromPreview': self.stats.get('from_preview', 0),
                 'scan': self.scan_state, 'search': self.search_status(), 'updated': self.stats.get('updated'),
                 'revision': self.revision}
 
@@ -148,6 +161,9 @@ class Library:
         if params.get('type'):
             where.append('i.mime=?')
             values.append(params['type'])
+        extra, more = catalog.conditions(params)
+        where += extra
+        values += more
         # Dates are the viewer's local days, so the stored UTC times are shifted by their offset before comparing.
         offset = utc_offset(params)
         for key, operator in [('from', '>='), ('to', '<=')]:
@@ -254,7 +270,8 @@ class Library:
         return {'months': months, 'total': sum(month['count'] for month in months)}
 
     def facets(self):
-        """The subfolders and file types present, each with how many distinct images it holds."""
+        """The subfolders and file types present, each with how many distinct images it holds, and for a catalog or a Photos
+        library, what its filters can choose from."""
         with connect(self.directory, rows=True) as db:
             pairs = db.execute('SELECT DISTINCT f.folder, f.image_id FROM files f WHERE f.image_id IS NOT NULL').fetchall()
             types = [dict(row) for row in db.execute(
@@ -266,7 +283,7 @@ class Library:
             for depth in range(1, len(parts) + 1):
                 folders.setdefault('/'.join(parts[:depth]), set()).add(image_id)
         return {'folders': [{'path': path, 'count': len(ids)} for path, ids in sorted(folders.items(), key=lambda item: item[0].lower())],
-                'types': types}
+                'types': types, 'catalog': {**catalog.facets(self.directory), 'kind': self.kind} if self.kind in ('catalog', 'bundle') else None}
 
     def details(self, image_id):
         with connect(self.directory, rows=True) as db:
@@ -275,7 +292,10 @@ class Library:
                 return None
             files = [dict(row) for row in db.execute(
                 'SELECT path, modified FROM files WHERE image_id=? ORDER BY modified DESC, path', (image_id,))]
-        return {**dict(image), 'root': photos.NAME if self.photos else str(self.folder), 'source': 'photos' if self.photos else 'folder',
+        if self.kind in ('catalog', 'bundle'):
+            known = catalog.details(self.directory, [file['path'] for file in files])
+            files = [{**file, 'catalog': known.get(file['path'])} for file in files]
+        return {**dict(image), 'root': photos.NAME if self.photos else str(self.folder), 'source': self.kind,
                 'files': files, 'preview': image['mime'] not in WEB_TYPES}
 
     def path(self, image_id, relative=None):

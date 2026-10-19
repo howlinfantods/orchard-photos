@@ -67,6 +67,11 @@ class RawTests(unittest.TestCase):
         self.assertTrue(raw.is_raw('x.dng'))
         self.assertFalse(raw.is_raw('photo.jpg'))
 
+    def test_a_jpeg_under_a_raw_name_is_read_as_a_jpeg(self):
+        self.assertFalse(raw.holds_raw(BytesIO(jpeg()), 'IMG_1.CR3'))
+        self.assertTrue(raw.holds_raw(BytesIO(b'II*\x00rest'), 'IMG_1.ARW'))
+        self.assertFalse(raw.holds_raw(BytesIO(b'II*\x00rest'), 'IMG_1.jpg'))
+
     def test_embedded_jpeg_is_used_and_turned_by_the_sensor_flip(self):
         fake = FakeRawpy(FakeRaw(SimpleNamespace(format='jpeg', data=jpeg()), flip=6))
         with patch.object(raw, 'rawpy', fake):

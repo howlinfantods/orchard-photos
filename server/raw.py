@@ -31,6 +31,17 @@ def is_raw(name: str) -> bool:
     return name[name.rfind('.'):].lower() in EXTENSIONS
 
 
+def holds_raw(stream, name: str) -> bool:
+    """Whether a stream named like a RAW file really holds one. A catalog can hand over the JPEG preview of an
+    offline RAW original under the original's name."""
+    if not is_raw(name):
+        return False
+    stream.seek(0)
+    start = stream.read(2)
+    stream.seek(0)
+    return start != b'\xff\xd8'
+
+
 def exif(stream) -> Image.Exif:
     """The EXIF from a RAW file's TIFF header, empty when it has none."""
     stream.seek(0)

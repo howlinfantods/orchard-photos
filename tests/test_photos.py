@@ -172,10 +172,11 @@ class OpeningTests(unittest.TestCase):
         self.app.open(self.temp.name)
         self.assertEqual(self.app.status()['recent'][0], {'path': str(photos.LIBRARY), 'label': 'Photos', 'available': True})
 
-    def test_only_the_system_library_opens_and_only_on_a_mac(self):
-        with self.assertRaisesRegex(ValueError, 'System Photo Library'):
+    def test_the_system_library_opens_through_photos_and_any_other_bundle_as_files(self):
+        with self.assertRaisesRegex(ValueError, 'does not exist'):
             self.app.open(str(Path(self.temp.name) / 'Old.photoslibrary'))
-        with patch('server.api.photos.available', return_value=False), self.assertRaisesRegex(ValueError, 'Only a Mac'):
+        # Without PhotoKit, the System Photo Library is a bundle like any other, and is read as files if it is there.
+        with patch('server.api.photos.available', return_value=False), self.assertRaisesRegex(ValueError, 'does not exist'):
             self.app.open(str(photos.LIBRARY))
         self.assertIsNone(self.app.library)
 
