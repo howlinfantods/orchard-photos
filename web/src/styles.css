@@ -269,3 +269,16 @@ main[data-timeline] .gallery { margin-right: calc(var(--page) + var(--timeline))
  .image-details { overflow: visible; padding: var(--s6) var(--page); }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+
+/* Film looks (FilmLook.tsx) */
+.film-look { margin-top: var(--s4); display: flex; flex-direction: column; gap: var(--s2); }
+.film-look h2 { margin: 0; font: inherit; color: var(--ink); display: flex; align-items: center; gap: var(--s2); }
+.film-look h2 svg { width: 16px; height: 16px; }
+.film-slider { display: flex; flex-direction: column; gap: var(--s1); }
+.film-slider span { display: flex; justify-content: space-between; }
+.film-slider output { color: var(--ink); font-variant-numeric: tabular-nums; }
+.film-slider input { width: 100%; accent-color: var(--ink); }
+.film-look .text-button { align-self: flex-start; margin-left: calc(var(--s3) * -1); }
+.film-note { font-size: 0.85em; }
+.film-note a { color: inherit; }
+.image-stage img.developing { opacity: 0.6; transition: opacity var(--motion) var(--ease); }

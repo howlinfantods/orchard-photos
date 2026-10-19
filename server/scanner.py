@@ -377,6 +377,7 @@ class Scanner:
                 'SELECT id FROM images WHERE id NOT IN (SELECT image_id FROM files WHERE image_id IS NOT NULL)')]
             db.executemany('DELETE FROM images WHERE id=?', [(image_id,) for image_id in orphans])
         for image_id in orphans:
-            for path in (thumbnail_path(self.directory, image_id), preview_path(self.directory, image_id)):
+            developed = list((self.directory / 'film').glob(f'{image_id}-*.jpg'))
+            for path in (thumbnail_path(self.directory, image_id), preview_path(self.directory, image_id), *developed):
                 while_open(path.unlink, missing_ok=True)
         return len(gone)

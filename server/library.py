@@ -7,7 +7,9 @@ import re
 import threading
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from server import photos
+from PIL import Image
+
+from server import film, photos, raw
 from server.atlas import Atlas
 from server.cache import connect, preview_path, thumbnail_path, while_open
 from server.groups import Groups
@@ -318,6 +320,42 @@ class Library:
                 (image.convert('RGB') if image.mode == 'RGBA' else image).save(temporary, 'JPEG', quality=90)
                 while_open(temporary.replace, preview)
         return preview
+
+    def developed(self, image_id, chosen: dict, edge: int, engine: film.Film):
+        """An image developed through a film look at a viewing size, drawn once and kept."""
+        path = self.original(image_id)
+        if path is None or not path.is_file():
+            return None
+        target = self.directory / 'film' / f'{image_id}-{film.look_key(chosen, edge, engine.version)}.jpg'
+        if not target.is_file():
+            film.save(engine.develop(path, chosen, edge), target)
+        return target
+
+    def export_items(self, ids):
+        """The originals to develop for an export, as (path, file name), in the order asked."""
+        items = []
+        for image_id in ids:
+            if not isinstance(image_id, str) or not IMAGE_ID.fullmatch(image_id):
+                raise ValueError('Choose images to export.')
+            relative = self.path(image_id)
+            path = self.original(image_id)
+            if relative and path and path.is_file():
+                items.append((path, relative.rpartition('/')[2]))
+        if not items:
+            raise ValueError('None of these images can be read now. Rescan the folder.')
+        return items
+
+    @staticmethod
+    def exif_of(path: Path):
+        """An original's EXIF, kept with a developed copy."""
+        try:
+            with path.open('rb') as stream:
+                if raw.is_raw(path.name):
+                    return raw.exif(stream)
+                with Image.open(stream) as image:
+                    return image.getexif()
+        except Exception:
+            return None
 
     def map(self, params):
         """The newest MAP_LIMIT filtered images with a place on the map and an icon slot in the atlas."""

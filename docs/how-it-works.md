@@ -28,6 +28,31 @@ On a Mac, the scanner can read the Photos library instead of a folder. macOS kee
 
 The server rescans the open folder every minute. A folder that's slow to list, like one on a network drive, is rechecked less often: the wait is at least 20 times as long as the last listing took.
 
+## RAW photos
+
+Nearly every camera stores a large JPEG preview inside each RAW file, rendered with the camera's own settings.
+`server/raw.py` extracts it with [rawpy](https://github.com/letmaik/rawpy) (LibRaw), which takes a few milliseconds
+where developing the sensor data takes a second or more, and reads the EXIF from the RAW file's TIFF header. On a
+Sony A1 file the preview is full size. A RAW file without a preview is developed at half size instead. Without
+rawpy installed, RAW files are counted as skipped, as before.
+
+## Film looks
+
+`server/film.py` loads the engine library of an installed [Fotufilm](https://fotufilm.com) through the C interface
+in its `fotufilm.h`, so a look is developed inside the server process rather than by a program started per photo.
+One engine serves the app, and renders on it run one at a time. The engine decodes the original itself, so a RAW
+file is developed from its sensor data. The last three decoded originals stay open, since trying several looks on one
+photo is the common case. A look developed for viewing is rounded up to 512, 1024, 2048 or 4096 pixels and kept in
+`film/`, named by the look, the size and the engine build, so a repeat is a file read and a new Fotufilm develops
+afresh. Exports develop at full size, one photo at a time, in the background.
+
+The engine delivers Display P3, and Orchard saves it with a Display P3 profile, which Fotufilm's
+`tools/generate-web-color-profiles.py` generates from the public definition. On Linux the engine develops on CUDA, or on
+Vulkan with `FOTUFILM_GPU_DEVICE=vulkan`, which also runs on Mesa's software Vulkan device when no GPU is free.
+
+Measured on a Ryzen 9900X with software Vulkan (no GPU): a 50-megapixel Sony ARW took 2.5 s for its first look at
+2048 pixels, including decoding, and 0.37 s for the next stock. Exporting it and two smaller photos (12 and 5 megapixels) at full size took 26 s.
+
 ## Visual search
 
 Orchard uses SigLIP 2 ([`google/siglip2-base-patch16-256`](https://huggingface.co/google/siglip2-base-patch16-256)), a model trained to turn both images and text into vectors. An image and a sentence that describe the same thing get vectors that point in a similar direction. It reads descriptions in many languages.

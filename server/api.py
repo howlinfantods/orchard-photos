@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import urllib.request
 import webbrowser
 
-from server import photos
+from server import film, photos
 from server.diagnostics import LAST_ERROR, report
 from server.library import IMAGE_ID, Library
 from server.semantic import Encoder
@@ -71,8 +71,10 @@ def tilde(path: Path) -> str:
 
 
 class App:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, fotufilm=None):
         self.data_dir = Path(data_dir).resolve()
+        self.film = film.Film(fotufilm)
+        self.export = film.Export()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.encoder = Encoder(self.data_dir / 'models')
         self.recent_path = self.data_dir / 'recent.json'
@@ -126,6 +128,27 @@ class App:
             self.remember(folder)
         threading.Thread(target=library.scan, daemon=True).start()
         return library
+
+    def export_film(self, form) -> dict:
+        """Start developing the chosen images through a look into a folder: the one given, or Pictures/<app>
+        Film/<stock>. The open folder itself is refused, so originals' folders are never written to."""
+        library = self.current()
+        chosen = film.look(form.get('look') or {})
+        ids = form.get('ids')
+        if not isinstance(ids, list) or not ids:
+            raise ValueError('Choose images to export.')
+        folder = form.get('folder')
+        destination = Path(folder).expanduser() if folder else Path.home() / 'Pictures' / f'{APP["name"]} Film' / chosen['stock']
+        if not destination.is_absolute():
+            raise ValueError('Enter a full path for the export folder.')
+        resolved = destination.resolve()
+        if resolved == library.folder or library.folder in resolved.parents:
+            raise ValueError(f'Export to a folder outside {library.folder.name}, so the folder of originals is never changed.')
+        try:
+            self.export.start(self.film, library.export_items(ids), chosen, resolved, library.exif_of)
+        except film.FilmUnavailable as error:
+            raise ValueError(str(error)) from None
+        return self.export.state
 
     def prepare(self):
         """Set up visual search in the background: download the model if needed, then prepare the open folder."""
@@ -359,6 +382,13 @@ class Handler(BaseHTTPRequestHandler):
             elif route == ('/api/folder/forget', True):
                 self.app.forget(self.form().get('path'))
                 self.json(self.app.status())
+            elif route == ('/api/film', False):
+                self.json({**self.app.film.status(), 'export': self.app.export.state})
+            elif route == ('/api/film/export', True):
+                self.json(self.app.export_film(self.form()), 202)
+            elif route == ('/api/film/export/cancel', True):
+                self.app.export.cancel()
+                self.json(self.app.export.state)
             elif route == ('/api/scan', True):
                 threading.Thread(target=self.app.current().scan, daemon=True).start()
                 self.json({'started': True}, 202)
@@ -429,6 +459,15 @@ class Handler(BaseHTTPRequestHandler):
         elif action == 'display' and not post:
             path = library.display(image_id)
             self.file(path, mime=details['mime'] if not details['preview'] else 'image/jpeg')
+        elif action == 'film' and not post:
+            chosen, edge = film.look(params), film.view_edge(params.get('edge'))
+            try:
+                path = library.developed(image_id, chosen, edge, self.app.film)
+            except film.FilmUnavailable as error:
+                raise ValueError(str(error)) from None
+            except OSError as error:
+                raise ValueError(f'Fotufilm could not develop this image: {error}') from None
+            self.file(path, mime='image/jpeg')
         elif action == 'original' and not post:
             path = library.original(image_id, params.get('path'))
             self.file(path, mime=details['mime'], download=params.get('download') == '1')
@@ -495,6 +534,7 @@ def arguments(argv=None):
     parser.add_argument('--port', type=int, default=APP['port'])
     parser.add_argument('--data-dir', type=Path, default=default_data_dir())
     parser.add_argument('--no-watch', action='store_true', help='scan only on request, not every minute')
+    parser.add_argument('--fotufilm', help='Fotufilm engine library, or the folder or app holding it, for film looks')
     # The launcher passes --window first, so a --browser after it wins.
     parser.add_argument('--window', dest='show', action='store_const', const='window', help='open in its own window')
     parser.add_argument('--browser', dest='show', action='store_const', const='browser', help='open in the browser instead')
@@ -538,7 +578,7 @@ def main(argv=None):
     if args.show == 'window' and (reason := unavailable()):
         print(f'{APP["name"]} is opening in the browser, because {reason}', flush=True)
         args.show = 'browser'
-    app = server.app = App(args.data_dir)
+    app = server.app = App(args.data_dir, args.fotufilm)
     try:
         if folder:
             app.open(folder)

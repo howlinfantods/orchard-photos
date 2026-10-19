@@ -14,6 +14,18 @@ Most photo apps with this kind of search upload your library to a server. Orchar
 - **Open your Apple Photos library** on a Mac, without exporting it.
 - **Filter** by subfolder, file type and date.
 - **See fewer duplicates.** Copies, bursts and edits of the same photo share one tile.
+- **Browse RAW photos** (ARW, CR2/CR3, NEF, DNG, RAF and more) through the preview each camera stores in them.
+- **View and export photos through film looks** from [Fotufilm](https://fotufilm.com), developed from the original, RAW files included.
+
+### Film looks
+
+Fotufilm models how a film stock exposes, develops and prints. Orchard doesn't include it: install Fotufilm, and
+Orchard loads its engine library from there (`/Applications/Fotufilm.app` on a Mac, `~/.local/share/fotufilm` or
+`/opt/fotufilm` on Linux), or from the path given with `--fotufilm` or `ORCHARD_FOTUFILM`. On Linux the AppImage can be
+extracted with `--appimage-extract` and the `squashfs-root` folder named. In the viewer, choose a stock under
+**Film look**; the look stays as you move between photos. **Export with this look** writes full-size JPEGs in
+Display P3 to `Pictures/Orchard Film/<stock>`, never into the folder you're browsing. Film stock profiles are
+Fotufilm's, under CC BY-SA 4.0; looks you render carry no licence requirement.
 
 ## Download
 

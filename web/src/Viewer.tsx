@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Copy, Download, FolderOpen, Images, ScanSearch, X, ZoomIn, ZoomOut } from 'lucide-react';
 import type { Details, Filters, Picture, Results } from './types';
 import { Disclosure } from './Panels';
+import { FilmPanel, filmUrl, useFilm, useLook } from './FilmLook';
 import { dateLabel, downloadUrl, fileName, filterParams, folderOf, imageUrl, plural, post, request, sizeLabel, typeLabel } from './types';
 
 interface Props {
@@ -25,6 +26,9 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
   // The grid shows one image per group of near-duplicates; the viewer can show any of them.
   const [members, setMembers] = useState<Picture[]>([]);
   const [shown, setShown] = useState(0);
+  const film = useFilm();
+  const { draft, look, setDraft } = useLook();
+  const [developing, setDeveloping] = useState(false);
   const front = items[index];
   const item = members[shown] ?? front;
   const folder = photos ? '' : folderOf(item.path);
@@ -68,6 +72,11 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
       setCopied({ id, note: scaled ? `Copied at ${width.toLocaleString()} × ${height.toLocaleString()}, the most the clipboard takes` : 'Copied' });
     } catch (e) { setError((e as Error).name === 'NotAllowedError' ? 'This browser blocked the clipboard. Download the image instead.' : 'The image could not be copied. Download it instead.'); }
   };
+  const filmOn = !!look.stock && !!film?.available;
+  // Developed for the screen, or at the largest size Orchard develops when shown at actual size.
+  const edge = zoom ? 4096 : Math.max(window.innerWidth, window.innerHeight) * window.devicePixelRatio;
+  const shownUrl = filmOn ? filmUrl(item.id, look, edge) : imageUrl(item.id, 'display');
+  useEffect(() => { setDeveloping(filmOn); }, [shownUrl, filmOn]);
   const file = details?.files.find(f => f.path === item.path);
   const others = details?.files.filter(f => f.path !== item.path) ?? [];
   // The date not already shown under the name.
@@ -91,7 +100,7 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
         <button className="icon-button" aria-label="Close image" title="Close" onClick={onClose}><X /></button>
       </div></header>
       <div className={`image-stage ${zoom ? 'zoomed' : ''}`}>
-        {failed ? <div className="empty"><p>This image could not be shown. The file may have moved or changed.</p><button className="text-button secondary" onClick={() => setFailed(false)}>Retry</button></div> : <img key={item.id} src={imageUrl(item.id, 'display')} alt={fileName(item.path)} onError={() => setFailed(true)} onClick={() => setZoom(!zoom)} />}
+        {failed ? <div className="empty"><p>This image could not be shown. The file may have moved or changed.</p><button className="text-button secondary" onClick={() => setFailed(false)}>Retry</button></div> : <img key={item.id} src={shownUrl} alt={fileName(item.path)} className={developing ? 'developing' : ''} onLoad={() => setDeveloping(false)} onError={() => { setDeveloping(false); setFailed(true); }} onClick={() => setZoom(!zoom)} />}
       </div>
       <aside className="image-details">
         <div className="detail-summary">
@@ -99,7 +108,7 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
           <p>{item.dated === 'taken' ? 'Taken' : 'Modified'} {dateLabel(item.date, true)}</p>
           <button className="crumbs" title={`${folder || rootName}. Show only this folder`} onClick={() => onFolder(folder)}>{crumbs}</button>
           <p className="numbers">{item.width.toLocaleString()} × {item.height.toLocaleString()} · {sizeLabel(item.size)} · {typeLabel(item.mime)}</p>
-          {details?.preview && <p>Shown as a converted preview. Download for the original {typeLabel(item.mime)}.</p>}
+          {filmOn ? <p>Developed from the original through {film?.stocks?.find(stock => stock.id === look.stock)?.name ?? look.stock}.</p> : details?.preview && <p>{item.mime === 'image/x-raw' ? 'Shown through the preview the camera stored in it.' : 'Shown as a converted preview.'} Download for the original {typeLabel(item.mime)}.</p>}
         </div>
         <div className="detail-actions">
           {onSimilar && <button className="text-button" onClick={() => onSimilar(item.id)}><ScanSearch />Find similar</button>}
@@ -107,7 +116,8 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
           <a className="text-button" href={downloadUrl(item.id, item.path)} download><Download />Download original</a>
           <button className="text-button" onClick={() => show(item.path)}><RevealIcon />{reveal}</button>
         </div>
-        <p className={error || pageError ? 'detail-status error-copy' : 'detail-status'} role="status">{error || pageError || (copied?.id === item.id ? copied.note : '')}</p>
+        <p className={error || pageError ? 'detail-status error-copy' : 'detail-status'} role="status">{error || pageError || (developing ? 'Developing…' : copied?.id === item.id ? copied.note : '')}</p>
+        <FilmPanel status={film} draft={draft} onChange={setDraft} ids={[item.id]} onMessage={setError} />
         {members.length > 1 && <section className="near-duplicates" aria-label="Near-duplicates">
           <h2>{plural(members.length, 'near-duplicate')}</h2>
           <ul>{members.map((member, place) => <li key={member.id}><button aria-pressed={place === shown} aria-label={`Show ${fileName(member.path)}`} title={member.path} onClick={() => setShown(place)}><img src={imageUrl(member.id)} alt="" decoding="async" /></button></li>)}</ul>
