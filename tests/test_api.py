@@ -212,6 +212,49 @@ class HandlerTests(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", SECURITY_HEADERS['Content-Security-Policy'])
         self.assertEqual(SECURITY_HEADERS['X-Frame-Options'], 'DENY')
 
+    def test_a_video_is_sent_in_ranges_for_a_player_that_seeks(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        clip = Path(folder.name) / 'clip.mp4'
+        content = bytes(range(256)) * 40
+        clip.write_bytes(content)
+        server = Server(('127.0.0.1', 0), Handler)
+        server.app = Mock()
+        server.app.current.return_value.details.return_value = {'mime': 'video/mp4', 'preview': False}
+        server.app.current.return_value.original.return_value = clip
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        size = len(content)
+
+        def fetch(requested=None):
+            connection = HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+            self.addCleanup(connection.close)
+            headers = {'Host': f'127.0.0.1:{server.server_port}', **({'Range': requested} if requested else {})}
+            connection.request('GET', f'/api/images/{"a" * 64}/original', headers=headers)
+            response = connection.getresponse()
+            return response, response.read()
+        response, body = fetch()
+        self.assertEqual((response.status, body, response.getheader('Accept-Ranges')), (200, content, 'bytes'))
+        for requested, first, last in (('bytes=0-99', 0, 99), ('bytes=1000-', 1000, size - 1), ('bytes=-100', size - 100, size - 1),
+                                       (f'bytes=10-{size + 500}', 10, size - 1), ('bytes=5-5', 5, 5)):
+            with self.subTest(requested=requested):
+                response, body = fetch(requested)
+                self.assertEqual(response.status, 206)
+                self.assertEqual(body, content[first:last + 1])
+                self.assertEqual(response.getheader('Content-Range'), f'bytes {first}-{last}/{size}')
+                self.assertEqual(response.getheader('Content-Length'), str(last - first + 1))
+                self.assertEqual(response.getheader('Content-Type'), 'video/mp4')
+        for requested in (f'bytes={size}-', 'bytes=-0'):
+            with self.subTest(requested=requested):
+                response, body = fetch(requested)
+                self.assertEqual((response.status, body, response.getheader('Content-Range')), (416, b'', f'bytes */{size}'))
+        # Ranges this doesn't answer, like several at once or a reversed one, get the whole file.
+        for requested in ('bytes=0-1,5-6', 'bytes=9-3', 'items=0-5', 'bytes=-'):
+            with self.subTest(requested=requested):
+                response, body = fetch(requested)
+                self.assertEqual((response.status, body), (200, content))
+
     def test_static_and_image_path_traversal_cannot_read_files(self):
         for path in ('/../server/api.py', '/../../etc/passwd', '/api/images/../original', '/api/images/%2e%2e/original'):
             with self.subTest(path=path):

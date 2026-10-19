@@ -156,7 +156,7 @@ export function LibraryPanel({ status, shown, narrowed, scanLeft, searchLeft, an
     {shown !== null && <p>{plural(shown, 'image')} shown with your filters.</p>}
     {library.notice && <p>{library.notice}</p>}
     {!!library.fromPreview && <p>{plural(library.fromPreview, 'file')} {library.fromPreview === 1 ? 'is' : 'are'} shown from Lightroom’s previews, because the originals aren’t on this computer. If the drive has another name here, start Orchard with --path-map OLD=NEW.</p>}
-    {unsupported && <p>{unsupported} {raw + videos === 1 ? 'isn’t' : 'aren’t'} shown yet.</p>}
+    {unsupported && <p>{unsupported} {raw + videos === 1 ? 'isn’t' : 'aren’t'} shown yet.{!library.ffmpeg && videos > 0 && ' Install ffmpeg to include the videos.'}</p>}
     {status.folder!.kind === 'bundle' && !!counts.unreadable && <p>Photos kept only in iCloud can’t be read from the library’s files.</p>}
     {status.folder!.photos && !!counts.unreadable && <p>Photos kept only in iCloud can’t be read. To include them, choose Download Originals to this Mac in Photos › Settings › iCloud.</p>}
     {!!library.photoLibraries.length && <p>{library.photoLibraries.length === 1 ? 'The Photos library here is' : 'The Photos libraries here are'} skipped in this folder. {status.photos ? 'To see your Photos library, choose Photos library under the folder name.' : 'Export photos to a folder to include them.'}</p>}

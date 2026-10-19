@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Copy, Download, FolderOpen, Images, ScanSearch, X, ZoomIn, ZoomOut } from 'lucide-react';
-import type { CatalogMeta, Details, Filters, Picture, Results, SourceKind } from './types';
+import type { CatalogMeta, Details, Filters, Picture, Results, Segment, SourceKind } from './types';
 import { Disclosure } from './Panels';
 import { FilmPanel, filmUrl, useFilm, useLook } from './FilmLook';
-import { dateLabel, downloadUrl, fileName, filterParams, folderOf, imageUrl, plural, post, request, sizeLabel, typeLabel } from './types';
+import { clock, dateLabel, downloadUrl, fileName, filterParams, folderOf, frameUrl, imageUrl, plural, post, request, sizeLabel, typeLabel, videoUrl } from './types';
 
 interface Props {
   items: Picture[]; index: number; total: number; hasMore: boolean; loadingMore: boolean; pageError: string; rootName: string; platform: string; filters: Filters;
@@ -33,6 +33,7 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
   const [developing, setDeveloping] = useState(false);
   const front = items[index];
   const item = members[shown] ?? front;
+  const isVideo = item.kind === 'video';
   const folder = photos || kind === 'bundle' ? '' : folderOf(item.path);
   const reveal = photos ? 'Show in Photos' : platform === 'darwin' ? 'Show in Finder' : 'Show in folder';
   const RevealIcon = photos ? Images : FolderOpen;
@@ -50,7 +51,7 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
     const controller = new AbortController();
     setZoom(false); setFailed(false); setError(''); setDetails(null);
     request<Details>(`/api/images/${item.id}`, { signal: controller.signal }).then(setDetails).catch(e => { if (e.name !== 'AbortError') setError(e.message); });
-    if (items[index + 1]) { const next = new Image(); next.src = imageUrl(items[index + 1].id, 'display'); }
+    if (items[index + 1] && items[index + 1].kind !== 'video') { const next = new Image(); next.src = imageUrl(items[index + 1].id, 'display'); }
     return () => controller.abort();
   }, [item.id, index, items]);
   useEffect(() => {
@@ -74,7 +75,7 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
       setCopied({ id, note: scaled ? `Copied at ${width.toLocaleString()} × ${height.toLocaleString()}, the most the clipboard takes` : 'Copied' });
     } catch (e) { setError((e as Error).name === 'NotAllowedError' ? 'This browser blocked the clipboard. Download the image instead.' : 'The image could not be copied. Download it instead.'); }
   };
-  const filmOn = !!look.stock && !!film?.available;
+  const filmOn = !!look.stock && !!film?.available && !isVideo;
   // Developed for the screen, or at the largest size Orchard develops when shown at actual size.
   const edge = zoom ? 4096 : Math.max(window.innerWidth, window.innerHeight) * window.devicePixelRatio;
   const shownUrl = filmOn ? filmUrl(item.id, look, edge) : imageUrl(item.id, 'display');
@@ -86,11 +87,13 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
   const parts = folder ? folder.split('/') : [rootName];
   const crumbs = (parts.length > CRUMBS ? ['…', ...parts.slice(-CRUMBS)] : parts).join(' › ');
   return <dialog ref={dialog} tabIndex={-1} className="viewer" aria-label="Image viewer" onCancel={onClose} onKeyDown={e => {
+    // A focused player keeps the arrow keys to seek.
+    if (e.target instanceof HTMLVideoElement && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) return;
     if (e.key === 'ArrowRight' && (index < items.length - 1 || hasMore) && !loadingMore) { e.preventDefault(); onChange(index + 1); }
     if (e.key === 'ArrowLeft' && index > 0 && !loadingMore) { e.preventDefault(); onChange(index - 1); }
     if (e.key === 'ArrowDown' && shown < members.length - 1) { e.preventDefault(); setShown(shown + 1); }
     if (e.key === 'ArrowUp' && shown > 0) { e.preventDefault(); setShown(shown - 1); }
-    if ((e.metaKey || e.ctrlKey) && e.key === 'c' && !getSelection()?.toString()) { e.preventDefault(); void copy(); }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'c' && !isVideo && !getSelection()?.toString()) { e.preventDefault(); void copy(); }
   }}>
     <div className="viewer-layout">
       <header className="viewer-top"><div className="viewer-navigation">
@@ -98,29 +101,30 @@ export default function Viewer({ items, index, total, hasMore, loadingMore, page
         <span>{(index + 1).toLocaleString()} / {total.toLocaleString()}</span>
         <button className="icon-button" aria-label="Next image" title="Next image" disabled={loadingMore || (index === items.length - 1 && !hasMore)} onClick={() => onChange(index + 1)}><ArrowRight /></button>
       </div><div className="viewer-navigation">
-        <button className="icon-button" aria-label={zoom ? 'Fit to screen' : 'View actual size'} title={zoom ? 'Fit to screen' : 'Actual size'} onClick={() => setZoom(!zoom)}>{zoom ? <ZoomOut /> : <ZoomIn />}</button>
+        {!isVideo && <button className="icon-button" aria-label={zoom ? 'Fit to screen' : 'View actual size'} title={zoom ? 'Fit to screen' : 'Actual size'} onClick={() => setZoom(!zoom)}>{zoom ? <ZoomOut /> : <ZoomIn />}</button>}
         <button className="icon-button" aria-label="Close image" title="Close" onClick={onClose}><X /></button>
       </div></header>
-      <div className={`image-stage ${zoom ? 'zoomed' : ''}`}>
+      {isVideo ? <VideoStage key={item.id} item={item} segments={details?.segments ?? []} /> : <div className={`image-stage ${zoom ? 'zoomed' : ''}`}>
         {failed ? <div className="empty"><p>This image could not be shown. The file may have moved or changed.</p><button className="text-button secondary" onClick={() => setFailed(false)}>Retry</button></div> : <img key={item.id} src={shownUrl} alt={fileName(item.path)} className={developing ? 'developing' : ''} onLoad={() => setDeveloping(false)} onError={() => { setDeveloping(false); setFailed(true); }} onClick={() => setZoom(!zoom)} />}
-      </div>
+      </div>}
       <aside className="image-details">
         <div className="detail-summary">
           <h1 title={fileName(item.path)}>{fileName(item.path)}</h1>
           <p>{item.dated === 'taken' ? 'Taken' : 'Modified'} {dateLabel(item.date, true)}</p>
           <button className="crumbs" title={`${folder || rootName}. Show only this folder`} onClick={() => onFolder(folder)}>{crumbs}</button>
-          <p className="numbers">{item.width.toLocaleString()} × {item.height.toLocaleString()} · {sizeLabel(item.size)} · {typeLabel(item.mime)}</p>
+          <p className="numbers">{item.width.toLocaleString()} × {item.height.toLocaleString()} · {isVideo && item.duration != null && `${clock(item.duration)} · `}{sizeLabel(item.size)} · {typeLabel(item.mime)}</p>
+          {isVideo && details?.logUnnormalized && <p>Log footage, indexed without a LUT. Set ORCHARD_LOG_LUT to a .cube file to search it as Rec. 709.</p>}
           {file?.catalog && <CatalogInfo meta={file.catalog} kind={kind} />}
           {filmOn ? <p>Developed from the original through {film?.stocks?.find(stock => stock.id === look.stock)?.name ?? look.stock}.</p> : details?.preview && <p>{item.mime === 'image/x-raw' ? 'Shown through the preview the camera stored in it.' : 'Shown as a converted preview.'} Download for the original {typeLabel(item.mime)}.</p>}
         </div>
         <div className="detail-actions">
           {onSimilar && <button className="text-button" onClick={() => onSimilar(item.id)}><ScanSearch />Find similar</button>}
-          <button className="text-button" onClick={copy}>{copied?.id === item.id ? <Check /> : <Copy />}Copy image</button>
+          {!isVideo && <button className="text-button" onClick={copy}>{copied?.id === item.id ? <Check /> : <Copy />}Copy image</button>}
           <a className="text-button" href={downloadUrl(item.id, item.path)} download><Download />Download original</a>
           <button className="text-button" onClick={() => show(item.path)}><RevealIcon />{reveal}</button>
         </div>
         <p className={error || pageError ? 'detail-status error-copy' : 'detail-status'} role="status">{error || pageError || (developing ? 'Developing…' : copied?.id === item.id ? copied.note : '')}</p>
-        <FilmPanel status={film} draft={draft} onChange={setDraft} ids={[item.id]} onMessage={setError} />
+        {!isVideo && <FilmPanel status={film} draft={draft} onChange={setDraft} ids={[item.id]} onMessage={setError} />}
         {members.length > 1 && <section className="near-duplicates" aria-label="Near-duplicates">
           <h2>{plural(members.length, 'near-duplicate')}</h2>
           <ul>{members.map((member, place) => <li key={member.id}><button aria-pressed={place === shown} aria-label={`Show ${fileName(member.path)}`} title={member.path} onClick={() => setShown(place)}><img src={imageUrl(member.id)} alt="" decoding="async" /></button></li>)}</ul>
@@ -148,6 +152,26 @@ function CatalogInfo({ meta, kind }: { meta: CatalogMeta; kind: SourceKind }) {
     {!!meta.keywords.length && <p>Keywords: {meta.keywords.join(', ')}</p>}
     {!!meta.collections.length && <p>{kind === 'bundle' ? 'Albums' : 'Collections'}: {meta.collections.join(', ')}</p>}
     {meta.fromPreview && <p>Shown from Lightroom’s preview, because the original isn’t on this computer.</p>}
+  </div>;
+}
+
+/** The original in a player, which starts at the search hit's time when there is one, with the segments' frames
+ *  under it. A frame starts the video at its time. */
+function VideoStage({ item, segments }: { item: Picture; segments: Segment[] }) {
+  const player = useRef<HTMLVideoElement>(null);
+  const [now, setNow] = useState(item.t ?? 0);
+  const [failed, setFailed] = useState(false);
+  const seek = (t: number) => { const node = player.current; if (!node) return; node.currentTime = t; setNow(t); void node.play().catch(() => undefined); };
+  // The last segment that has begun.
+  const current = segments.reduce((found, segment, place) => segment.t <= now + .5 ? place : found, -1);
+  return <div className="image-stage video">
+    {failed ? <p className="video-note">This browser can’t play this video, which may use a codec it lacks. Download the original to watch it, or use the frames below to find the moment.</p>
+      : <video ref={player} src={videoUrl(item.id, item.path)} poster={imageUrl(item.id)} controls preload="metadata" aria-label={fileName(item.path)}
+          onLoadedMetadata={() => { if (item.t && player.current) player.current.currentTime = item.t; }}
+          onTimeUpdate={() => setNow(player.current?.currentTime ?? 0)} onError={() => setFailed(true)} />}
+    {segments.length > 0 && <ul className="segments" aria-label="Segments">{segments.map((segment, place) => <li key={segment.index}>
+      <button aria-current={place === current} aria-label={`Go to ${clock(segment.t)}`} title={`${clock(segment.start)} – ${clock(segment.end)}`} onClick={() => seek(segment.t)}>
+        <img src={frameUrl(item.id, segment.index)} alt="" loading="lazy" decoding="async" /><span>{clock(segment.t)}</span></button></li>)}</ul>}
   </div>;
 }
 

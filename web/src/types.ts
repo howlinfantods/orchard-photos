@@ -8,14 +8,17 @@ export type Range = 'all' | 'today' | '7d' | '28d' | 'year' | 'custom';
  *  name one each. The last four only mean something for a Lightroom catalog or a Photos library file. */
 export interface Filters { folder: string; type: string; range: Range; from: string; to: string; rating: number; picks: boolean; keyword: string; collection: string }
 /** One image, described by its newest file that passes the filters. `dated` says where its date came from.
- *  In the grid it fronts its `group` of near-duplicates, `members` images in all, counting itself. */
-export interface Picture { id: string; width: number; height: number; mime: string; size: number; date: string; dated: 'taken' | 'modified'; path: string; copies: number; group: string; members: number }
+ *  In the grid it fronts its `group` of near-duplicates, `members` images in all, counting itself.
+ *  A video has `kind: 'video'` and its `duration` in seconds, and a search hit says `t`, the second its best match is at. */
+export interface Picture { id: string; width: number; height: number; mime: string; size: number; date: string; dated: 'taken' | 'modified'; path: string; copies: number; group: string; members: number; kind: 'image' | 'video'; duration: number | null; t?: number }
+/** A stretch of a video that looks alike, shown by its sharpest frame, which is at `t`. */
+export interface Segment { index: number; t: number; start: number; end: number }
 /** What a Lightroom catalog or a Photos library says about a file. `pick` is 1 flagged, -1 rejected; `origin` is the original's
  *  path, and `fromPreview` says it is missing and Lightroom's preview of it is shown. */
 export interface CatalogMeta { rating: number; pick: number; favorite: boolean; label: string | null; captured: string | null; fromPreview: boolean; origin: string; keywords: string[]; collections: string[] }
 interface FileCopy { path: string; modified: string; catalog?: CatalogMeta | null }
 export type SourceKind = 'folder' | 'photos' | 'catalog' | 'bundle';
-export interface Details { id: string; width: number; height: number; mime: string; size: number; taken: string | null; camera: string | null; root: string; source: SourceKind; files: FileCopy[]; preview: boolean }
+export interface Details { id: string; width: number; height: number; mime: string; size: number; taken: string | null; camera: string | null; root: string; source: SourceKind; files: FileCopy[]; preview: boolean; kind: 'image' | 'video'; duration: number | null; codec?: string; segments?: Segment[]; logUnnormalized?: boolean }
 /** `received` and `size` are bytes, sent while the model downloads. */
 export interface SearchStatus { state: 'idle' | 'downloading' | 'loading' | 'indexing' | 'ready' | 'error'; indexed: number; total: number; downloaded: boolean; received?: number; size?: number; error?: string }
 /** Visual queries can be answered: some images are prepared. */
@@ -26,7 +29,7 @@ export interface Scan { state: 'ready' | 'scanning' | 'error'; found?: number; d
 /** `skipped` counts the RAW photos and videos the scanner can't read, from the last scan that counted them. */
 export interface LibraryStatus {
   counts: { images: number; files: number; duplicates: number; nearDuplicates: number; unreadable: number };
-  unlistedFolders: number; photoLibraries: string[]; skipped: { raw?: number; video?: number }; scan: Scan; search: SearchStatus; updated?: string; revision: number;
+  unlistedFolders: number; photoLibraries: string[]; skipped: { raw?: number; video?: number }; ffmpeg: boolean; scan: Scan; search: SearchStatus; updated?: string; revision: number;
   /** A catalog says when it shows a snapshot, and `fromPreview` counts files shown from Lightroom's previews. */
   notice: string | null; fromPreview: number;
 }
@@ -78,6 +81,9 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const post = <T,>(path: string, body: unknown = {}) => request<T>(path, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
 /** Thumbnails are small WebP copies; `display` is the original, or a converted JPEG for formats browsers cannot show. */
 export function imageUrl(id: string, size: 'thumbnail' | 'display' = 'thumbnail') { return `/api/images/${id}/${size}`; }
+/** A segment's frame, a small WebP, and the video file itself, which the player reads in ranges. */
+export const frameUrl = (id: string, index: number) => `/api/images/${id}/frame/${index}`;
+export const videoUrl = (id: string, path: string) => `/api/images/${id}/original?${new URLSearchParams({ path })}`;
 export const downloadUrl = (id: string, path: string) => `/api/images/${id}/original?${new URLSearchParams({ path, download: '1' })}`;
 
 /** Browser storage keys, namespaced by the app so two local apps never read each other's settings. */
@@ -112,7 +118,13 @@ export const monthStart = (month: string) => new Date(Number(month.slice(0, 4)),
 export const fileName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 export const folderOf = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
 const TYPES: Record<string, string> = { 'image/jpeg': 'JPEG', 'image/png': 'PNG', 'image/gif': 'GIF', 'image/webp': 'WebP', 'image/avif': 'AVIF', 'image/bmp': 'BMP', 'image/tiff': 'TIFF', 'image/heif': 'HEIC', 'image/x-raw': 'RAW' };
-export const typeLabel = (mime: string) => TYPES[mime] || mime.replace(/^image\//, '').toUpperCase();
+const VIDEO_TYPES: Record<string, string> = { 'video/mp4': 'MP4', 'video/quicktime': 'MOV', 'video/x-matroska': 'MKV', 'video/webm': 'WebM', 'video/x-msvideo': 'AVI', 'video/mpeg': 'MPEG' };
+export const typeLabel = (mime: string) => TYPES[mime] || VIDEO_TYPES[mime] || mime.replace(/^(image|video)\//, '').toUpperCase();
+/** A length of time, like 4:07 or 1:02:09. */
+export function clock(seconds: number) {
+  const s = Math.max(0, Math.floor(seconds)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}` : `${m}:${String(s % 60).padStart(2, '0')}`;
+}
 export function sizeLabel(bytes: number) {
   if (bytes < 1000) return `${bytes} B`;
   const [value, unit] = bytes < 1e6 ? [bytes / 1e3, 'KB'] : bytes < 1e9 ? [bytes / 1e6, 'MB'] : [bytes / 1e9, 'GB'];

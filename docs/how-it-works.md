@@ -26,6 +26,8 @@ Large images are decoded in turn, within a shared memory budget, and shrunk befo
 
 On a Mac, the scanner can read the Photos library instead of a folder. macOS keeps the library's files closed to other apps, so `server/photos.py` asks Photos for them through PhotoKit, with the user's permission. It lists every photo with its asset id, original file name and modification date, and hands over each new or edited photo's current version, which the scanner hashes, reads and draws like a file. A photo whose modification date hasn't changed isn't read again.
 
+When ffmpeg and ffprobe are installed, videos are indexed too, as items of their own. A video's id is the SHA-256 of its size and three 4 MiB samples, from the start, middle and end, since hashing whole files of several GB would take hours. ffprobe gives its duration, displayed size, codec, creation time and camera, and a first thumbnail is drawn from its middle. Preparing it for search then decodes only its keyframes, at most one a second, scaled to fit 384 px, and embeds each with the image encoder. Consecutive frames with a cosine similarity of 0.95 or more form one segment, which keeps its sharpest frame and that frame's vector. The frame nearest the mean vector becomes the video's grid thumbnail. A video scores in a search as its best segment, and the result says where in the video that is, so the viewer plays the original from there. Sony S-Log3 footage is converted to Rec. 709 first with the .cube file named by `ORCHARD_LOG_LUT`; without one it is indexed anyway and marked.
+
 The server rescans the open folder every minute. A folder that's slow to list, like one on a network drive, is rechecked less often: the wait is at least 20 times as long as the last listing took.
 
 ## RAW photos

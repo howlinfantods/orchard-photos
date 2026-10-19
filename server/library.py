@@ -9,13 +9,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image
 
-from server import catalog, film, photos, raw
+from server import catalog, film, photos, raw, video
 from server.atlas import Atlas
-from server.cache import connect, preview_path, thumbnail_path, while_open
+from server.cache import connect, frames_path, preview_path, thumbnail_path, while_open
 from server.groups import Groups
 from server.layout import Layout
 from server.scanner import FolderUnavailable, ScanCancelled, Scanner, open_image, scaled
-from server.semantic import SemanticIndex
+from server.semantic import MODEL, SemanticIndex
 
 PAGE_SIZE = 80
 # The most one request returns, so a jump far down the timeline loads the pages above it in a few requests.
@@ -57,7 +57,7 @@ class Library:
             self.kind, source = 'folder', None
         catalog.prepare(self.directory)
         self.scanner = Scanner(self.folder, self.directory, source)
-        self.semantic = SemanticIndex(self.directory, encoder)
+        self.semantic = SemanticIndex(self.directory, encoder, lambda image_id: self.original(image_id))
         self.atlas = Atlas(self.directory)
         self.layout = Layout(self.semantic)
         self.groups = Groups(self.directory, self.semantic)
@@ -141,6 +141,7 @@ class Library:
                 'unlistedFolders': self.stats.get('unlisted_folders', 0),
                 'photoLibraries': self.stats.get('photo_libraries', []), 'skipped': self.stats.get('skipped', {}),
                 'notice': self.stats.get('notice'), 'fromPreview': self.stats.get('from_preview', 0),
+                'ffmpeg': video.available(),
                 'scan': self.scan_state, 'search': self.search_status(), 'updated': self.stats.get('updated'),
                 'revision': self.revision}
 
@@ -207,8 +208,9 @@ class Library:
         )'''
         shown = 'WHERE p.place=1 ORDER BY p.date DESC,i.id' if collapse else 'ORDER BY p.place'
         sql = f'''{matching} SELECT i.id,i.width,i.height,i.mime,i.size,p.date,CASE WHEN i.taken IS NULL THEN 'modified' ELSE 'taken' END AS dated,
-                         p.path,p.copies,p.grp AS "group",p.members
-                  FROM images i JOIN pictures p ON p.image_id=i.id {shown}'''
+                         p.path,p.copies,p.grp AS "group",p.members,
+                         CASE WHEN v.image_id IS NULL THEN 'image' ELSE 'video' END AS kind,v.duration
+                  FROM images i JOIN pictures p ON p.image_id=i.id LEFT JOIN videos v ON v.image_id=i.id {shown}'''
         # Grouping needs every matching row, so SQL can't page this any cheaper than slicing the whole list.
         with connect(self.directory, rows=True) as db:
             return db.execute(sql, values).fetchall()
@@ -241,12 +243,16 @@ class Library:
             rows = self.tiles(where, values)
         else:
             self.require_search()
-            ranking = dict(self.semantic.search(text=query, image_id=reference, image_bytes=image_bytes))
+            hits = self.semantic.search(text=query, image_id=reference, image_bytes=image_bytes)
+            ranking = dict(hits)
+            # Where in each video the best match is.
+            times = {hit[0]: hit.t for hit in hits if getattr(hit, 't', None) is not None}
             # The reference and its near-duplicates come first.
             with connect(self.directory, rows=True) as db:
                 own = db.execute('SELECT coalesce((SELECT group_id FROM image_groups WHERE image_id=?), ?)', (reference, reference)).fetchone()[0]
             rows = [row for row in self.tiles(where, values) if row['id'] in ranking]
             rows.sort(key=lambda row: (row['group'] == own, ranking[row['id']]), reverse=True)
+            rows = [{**dict(row), 't': times[row['id']]} if row['id'] in times else row for row in rows]
         return {'items': [dict(row) for row in rows[offset:offset + limit]], 'total': len(rows), 'offset': offset,
                 'hasMore': offset + limit < len(rows)}
 
@@ -292,11 +298,18 @@ class Library:
                 return None
             files = [dict(row) for row in db.execute(
                 'SELECT path, modified FROM files WHERE image_id=? ORDER BY modified DESC, path', (image_id,))]
+            clip = db.execute('SELECT duration, codec, transfer, log_slog3, log_unnormalized FROM videos WHERE image_id=?', (image_id,)).fetchone()
+            segments = [{'index': row['idx'], 't': row['t_frame'], 'start': row['t_start'], 'end': row['t_end']} for row in db.execute(
+                'SELECT idx, t_start, t_end, t_frame FROM video_segments WHERE image_id=? AND model=? ORDER BY idx', (image_id, MODEL))]
         if self.kind in ('catalog', 'bundle'):
             known = catalog.details(self.directory, [file['path'] for file in files])
             files = [{**file, 'catalog': known.get(file['path'])} for file in files]
-        return {**dict(image), 'root': photos.NAME if self.photos else str(self.folder), 'source': self.kind,
-                'files': files, 'preview': image['mime'] not in WEB_TYPES}
+        details = {**dict(image), 'root': photos.NAME if self.photos else str(self.folder), 'source': self.kind,
+                   'files': files, 'preview': image['mime'] not in WEB_TYPES, 'kind': 'image', 'duration': None}
+        if clip:
+            details.update(kind='video', duration=clip['duration'], codec=clip['codec'], transfer=clip['transfer'], preview=False,
+                           logSlog3=bool(clip['log_slog3']), logUnnormalized=bool(clip['log_unnormalized']), segments=segments)
+        return details
 
     def path(self, image_id, relative=None):
         """An image's path in the folder: the named copy if given and it holds this image, else the first."""
@@ -321,6 +334,16 @@ class Library:
 
     def thumbnail(self, image_id):
         return thumbnail_path(self.directory, image_id)
+
+    def frame(self, image_id, index: int):
+        """The file of a video's segment frame."""
+        return frames_path(self.directory, image_id) / f'{index}.webp'
+
+    def provisional(self, image_id) -> bool:
+        """Whether a thumbnail is a video's first, from its middle, which preparing the video replaces."""
+        with connect(self.directory, rows=True) as db:
+            return db.execute('SELECT 1 FROM videos v WHERE v.image_id=? AND NOT EXISTS '
+                              '(SELECT 1 FROM video_segments s WHERE s.image_id=v.image_id AND s.model=?)', (image_id, MODEL)).fetchone() is not None
 
     def display(self, image_id):
         """A file the browser can show: the original when it can, otherwise a JPEG drawn once and kept."""

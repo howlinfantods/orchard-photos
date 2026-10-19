@@ -86,6 +86,8 @@ html { scroll-padding-top: calc(var(--s4) + var(--search-height) + var(--s2) * 2
 .picture:hover img { opacity: .87; }
 .picture:focus-visible { outline-offset: var(--s1); }
 .picture .missing { display: flex; height: 100%; align-items: center; justify-content: center; color: var(--muted); padding: var(--s4); }
+.picture .duration { position: absolute; left: var(--s2); bottom: var(--s2); display: flex; align-items: center; gap: var(--s1); padding: 2px var(--s2); border-radius: var(--pill); background: color-mix(in srgb, var(--surface) 88%, transparent); color: var(--ink); font-variant-numeric: tabular-nums; }
+.picture .duration svg { width: 12px; height: 12px; fill: currentColor; }
 .picture .members { position: absolute; right: var(--s2); bottom: var(--s2); display: flex; align-items: center; gap: var(--s1); padding: 2px var(--s2); border-radius: var(--pill); background: color-mix(in srgb, var(--surface) 88%, transparent); color: var(--ink); font-variant-numeric: tabular-nums; }
 /* The timeline: a column of years in the right gutter, beside a marker for where the grid is. */
 main[data-timeline] .gallery { margin-right: calc(var(--page) + var(--timeline)); }
@@ -164,6 +166,13 @@ main[data-timeline] .gallery { margin-right: calc(var(--page) + var(--timeline))
 .viewer-navigation { display: flex; align-items: center; gap: var(--s3); color: var(--muted); font-variant-numeric: tabular-nums; }
 .image-stage { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; overflow: auto; margin: 0 0 var(--s8) var(--page); }
 .image-stage img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; }
+.image-stage.video { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: var(--s3); align-items: stretch; justify-items: center; overflow: hidden; }
+.image-stage video { max-width: 100%; max-height: 100%; min-height: 0; min-width: 0; background: #000; border-radius: var(--radius); justify-self: center; }
+.image-stage .video-note { align-self: center; color: var(--muted); text-align: center; padding: var(--s4); }
+.segments { display: flex; gap: var(--s2); max-width: 100%; overflow-x: auto; margin: 0; padding: 0 0 var(--s1); list-style: none; }
+.segments button { display: grid; gap: 2px; padding: 0; border: 2px solid transparent; border-radius: var(--radius); background: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.segments button[aria-current='true'] { border-color: var(--ink); color: var(--ink); }
+.segments img { display: block; height: 64px; width: auto; border-radius: calc(var(--radius) - 2px); object-fit: cover; }
 .image-stage.zoomed { display: block; }
 .image-stage.zoomed img { max-width: none; max-height: none; cursor: zoom-out; }
 /* The sidebar has two text styles, both at body size: ink for the name and path, muted for everything else. */

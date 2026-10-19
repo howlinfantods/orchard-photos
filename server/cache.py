@@ -34,6 +34,11 @@ def preview_path(directory: Path, image_id: str) -> Path:
     return Path(directory) / 'previews' / f'{image_id}.jpg'
 
 
+def frames_path(directory: Path, image_id: str) -> Path:
+    """Where a video's segment frames are kept, one WebP per segment."""
+    return Path(directory) / 'frames' / image_id
+
+
 def while_open(change, *args, **options):
     """Replace or delete a file, waiting briefly on Windows for any thread still reading it to finish."""
     for attempt in range(OPEN_FILE_TRIES):
