@@ -19,6 +19,10 @@ EXTENSIONS = {'.3fr', '.arw', '.cr2', '.cr3', '.crw', '.dcr', '.dng', '.erf', '.
 MIME = 'image/x-raw'
 # EXIF in a TIFF-based RAW file sits near its start. CR3 and RAF aren't TIFF, and get no EXIF this way.
 HEADER_BYTES = 1 << 20
+# Where embedded JPEGs are looked for when LibRaw can't read a file: cameras newer than LibRaw, like the Sony A7 V,
+# still put their previews near the start of the file.
+SEARCH_BYTES = 16 << 20
+SOI = b'\xff\xd8\xff'
 # LibRaw's flip, as the EXIF orientation that undoes it.
 ORIENTATION = {0: 1, 3: 3, 5: 8, 6: 6}
 
@@ -53,14 +57,40 @@ def exif(stream) -> Image.Exif:
     return data
 
 
+def largest_embedded(stream) -> Image.Image:
+    """The largest JPEG stored in the first SEARCH_BYTES of a RAW file, for files LibRaw doesn't know. Orientation
+    comes from the RAW file's EXIF."""
+    stream.seek(0)
+    data = stream.read(SEARCH_BYTES)
+    best, area, start = None, 0, data.find(SOI)
+    while start >= 0:
+        try:
+            with Image.open(BytesIO(data[start:])) as candidate:
+                if candidate.format == 'JPEG' and candidate.width * candidate.height > area:
+                    best, area = start, candidate.width * candidate.height
+        except Exception:
+            pass
+        start = data.find(SOI, start + 3)
+    if best is None:
+        raise OSError('No preview in this RAW file')
+    image = Image.open(BytesIO(data[best:]))
+    if image.getexif().get(274, 1) == 1:
+        image.getexif()[274] = exif(stream).get(274, 1)
+    return image
+
+
 def open_raw(stream) -> Image.Image:
     """The image a RAW file holds, as Pillow opens a JPEG: the embedded preview, or else a half-size development.
     Its EXIF orientation is set from the RAW file, so callers turn it upright as they would a JPEG, and
     `info['raw_size']` is the developed photo's size, which the preview may be smaller than."""
     if rawpy is None:
-        raise OSError('RAW support needs rawpy. Install it with: pip install rawpy')
+        return largest_embedded(stream)
     stream.seek(0)
-    with rawpy.imread(stream) as raw:
+    try:
+        raw_file = rawpy.imread(stream)
+    except rawpy.LibRawError:
+        return largest_embedded(stream)
+    with raw_file as raw:
         orientation = ORIENTATION.get(raw.sizes.flip, 1)
         try:
             thumb = raw.extract_thumb()

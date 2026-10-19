@@ -184,7 +184,7 @@ class Source:
         if not source:
             raise self.missing(path)
         if preview:
-            return BytesIO(largest_jpeg(Path(source).read_bytes()))
+            return BytesIO(preview_jpeg(Path(source)))
         try:
             return Path(source).open('rb')
         except FileNotFoundError:
@@ -199,7 +199,7 @@ class Source:
         if not target.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_suffix(f'.{os.getpid()}.tmp')
-            temporary.write_bytes(largest_jpeg(Path(source).read_bytes()))
+            temporary.write_bytes(preview_jpeg(Path(source)))
             while_open(temporary.replace, target)
         return target
 
@@ -347,11 +347,17 @@ class LightroomCatalog(Source):
             with read_only(snapshot(source, self.copies)) as db:
                 if not {'imageId', 'uuid', 'digest'} <= columns(db, 'ImageCacheEntry'):
                     return found
+                listings = {}
                 for image, uuid, digest in db.execute('SELECT imageId, uuid, digest FROM ImageCacheEntry ORDER BY rowid'):
                     uuid = str(uuid or '')
                     if len(uuid) >= 4 and digest and safe(uuid, str(digest)):
-                        candidate = self.previews / uuid[0] / uuid[:4] / f'{uuid}-{digest}.lrprev'
-                        if candidate.is_file():
+                        folder = self.previews / uuid[0] / uuid[:4]
+                        if folder not in listings:
+                            try:
+                                listings[folder] = set(os.listdir(folder))
+                            except OSError:
+                                listings[folder] = set()
+                        if candidate := preview_level(folder, f'{uuid}-{digest}', listings[folder]):
                             found[image] = candidate
         except (sqlite3.DatabaseError, OSError) as error:
             logger.info('Could not read the previews of %s: %s', self.path, error)
@@ -365,6 +371,30 @@ class LightroomCatalog(Source):
         for folder in self.exports.iterdir():
             if folder.name not in current:
                 shutil.rmtree(folder, ignore_errors=True)
+
+
+# Lightroom Classic up to version 13 or so kept each image's previews in one .lrprev file of AgHg sections. Later
+# versions write each size as its own JPEG, named <uuid>-<digest>_<long edge>, with no extension.
+VIEW_LEVEL = 3072
+
+
+def preview_level(folder: Path, stem: str, names: set) -> Path | None:
+    """An image's preview file: its .lrprev, or the largest separate level up to VIEW_LEVEL pixels, which is enough to
+    view full screen at a third of the bytes of the largest, or else the largest there is."""
+    if f'{stem}.lrprev' in names:
+        return folder / f'{stem}.lrprev'
+    levels = sorted(int(name.rpartition('_')[2]) for name in names
+                    if name.startswith(f'{stem}_') and name.rpartition('_')[2].isdigit())
+    if not levels:
+        return None
+    fitting = [level for level in levels if level <= VIEW_LEVEL]
+    return folder / f'{stem}_{fitting[-1] if fitting else levels[-1]}'
+
+
+def preview_jpeg(path: Path) -> bytes:
+    """The JPEG in a preview file: the largest level of an .lrprev, or a separate level as it is."""
+    data = path.read_bytes()
+    return largest_jpeg(data) if path.suffix == '.lrprev' else data
 
 
 MAGIC = b'AgHg'

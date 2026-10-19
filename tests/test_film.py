@@ -47,13 +47,18 @@ class LocateTests(unittest.TestCase):
     def test_nothing_installed_is_unavailable(self):
         with patch.dict(os.environ, {'ORCHARD_FOTUFILM': str(self.root / 'missing')}):
             status = film.Film().status()
-        self.assertFalse(status['available'])
-        self.assertIn('fotufilm.com', status['reason'])
+            self.assertFalse(status['available'])
+            self.assertIn('fotufilm.com', status['reason'])
+            with self.assertRaises(film.FilmUnavailable):
+                film.Film().version  # noqa: B018
 
 
 @unittest.skipUnless(os.environ.get('ORCHARD_FOTUFILM'), 'Set ORCHARD_FOTUFILM to develop through a real Fotufilm')
 class EngineTests(unittest.TestCase):
     """Runs against an installed Fotufilm. On a machine without a free GPU, point Vulkan at a software device."""
+
+    def test_the_version_is_known_before_anything_else_is_asked(self):
+        self.assertTrue(film.Film().version)
 
     def test_develops_a_photo_in_display_p3(self):
         engine = film.Film()

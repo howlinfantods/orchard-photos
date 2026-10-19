@@ -87,9 +87,26 @@ class RawTests(unittest.TestCase):
         self.assertEqual(image.size, (30, 20))
         self.assertEqual(image.getexif()[274], 3)
 
-    def test_missing_rawpy_is_an_os_error(self):
+    def test_without_rawpy_a_raw_without_a_preview_is_an_os_error(self):
         with patch.object(raw, 'rawpy', None), self.assertRaises(OSError):
             raw.open_raw(BytesIO(b'raw bytes'))
+
+    def test_a_camera_libraw_does_not_know_is_read_through_its_largest_embedded_jpeg(self):
+        # Like a Sony A7 V file: a TIFF header, then a thumbnail, a screen preview and a full-size JPEG.
+        header = tiff_header(model='ILCE-7M5').getvalue()
+        data = header + jpeg((16, 12)) + b'\x00' * 40 + jpeg((160, 108)) + jpeg((70, 47)) + b'sensor data'
+
+        class Refusing(FakeRawpy):
+            class LibRawError(Exception):
+                pass
+
+            def imread(self, _stream):
+                raise self.LibRawError('Unsupported file format or not RAW file')
+
+        for module in (None, Refusing(None)):
+            with self.subTest(rawpy=module), patch.object(raw, 'rawpy', module):
+                image = raw.open_raw(BytesIO(data))
+                self.assertEqual(image.size, (160, 108))
 
     def test_exif_comes_from_the_tiff_header(self):
         taken, camera = exif_details(None, raw.exif(tiff_header()))

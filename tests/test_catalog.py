@@ -207,6 +207,26 @@ class LightroomTests(LightroomFixture):
         with Image.open(shown) as exported:
             self.assertEqual(exported.size, (80, 60))
 
+    def test_lightroom_15_previews_are_separate_jpegs_per_size(self):
+        uuid, digest = 'BCDE1234-0000-0000-0000-000000000000', 'beef'
+        folder = self.previews / uuid[0] / uuid[:4]
+        folder.mkdir(parents=True)
+        for edge, size in ((320, (32, 24)), (3072, (96, 72)), (6144, (192, 144))):
+            (folder / f'{uuid}-{digest}_{edge}').write_bytes(jpeg(size, 'teal'))
+        db = sqlite3.connect(self.previews / 'previews.db')
+        db.execute('CREATE TABLE IF NOT EXISTS ImageCacheEntry (imageId INTEGER, uuid TEXT, digest TEXT)')
+        db.execute('INSERT INTO ImageCacheEntry VALUES (?,?,?)', (14, uuid, digest))
+        db.commit()
+        db.close()
+        scanner, stats = self.scan()
+        self.assertEqual((stats['unreadable'], stats['from_preview']), (0, 1))
+        with connect(self.cache, rows=True) as db:
+            meta = db.execute("SELECT source FROM catalog_meta WHERE path='Photos/2024/gone.jpg'").fetchone()
+        # The 3072 level is enough to view, at a fraction of the largest's bytes.
+        self.assertTrue(meta['source'].endswith(f'{uuid}-{digest}_3072'))
+        with Image.open(scanner.source.file('Photos/2024/gone.jpg')) as shown:
+            self.assertEqual(shown.size, (96, 72))
+
     def test_the_original_is_used_again_once_it_is_back(self):
         self.preview()
         self.scan()

@@ -141,6 +141,7 @@ class Film:
     @property
     def version(self) -> str:
         """The engine build, from its library file, so a new Fotufilm develops looks afresh."""
+        self._load()
         status = self._path.stat()
         return f'{self._describe.get("apiVersion")}-{status.st_size}-{status.st_mtime_ns}'
 
