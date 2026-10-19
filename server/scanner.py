@@ -73,6 +73,10 @@ class OnlyInCloud(OSError):
     """A photo whose original is in iCloud, not on this computer."""
 
 
+class Offline(OSError):
+    """A file a catalog lists whose original is not on this computer, and which has no preview to show instead."""
+
+
 def walk(root: Path, skip=frozenset(), found=None):
     """Every image file below root as (relative posix path, stat), the folders that could not be listed, the Photos
     libraries passed over, and how many RAW and video files were skipped. `found` hears the running count of image
@@ -233,6 +237,8 @@ def scaled(image, edge: int):
 def failure(error: Exception) -> str:
     if isinstance(error, OnlyInCloud):
         return 'Only in iCloud'
+    if isinstance(error, Offline):
+        return 'Original is offline'
     if isinstance(error, Image.DecompressionBombError):
         return 'Too large to open'
     if isinstance(error, UnidentifiedImageError):
@@ -319,6 +325,9 @@ class Scanner:
         stats['listed_seconds'] = round(listed, 3)
         stats['unlisted_folders'] = len(unreadable)
         stats['photo_libraries'] = libraries
+        # A catalog says when it is showing a snapshot, and how many files it could only show from a preview.
+        stats['notice'] = getattr(self.source, 'notice', None)
+        stats['from_preview'] = getattr(self.source, 'from_preview', 0)
         stats['skipped'] = skipped
         return stats
 

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronRight, FolderOpen, Image as ImageIcon, Images, X } from 'lucide-react';
-import type { Facets, Filters, LibraryStatus, Model, Range, SearchMode, SearchStatus, Status, Updates } from './types';
+import type { CatalogFacets, Facets, Filters, LibraryStatus, Model, Range, SearchMode, SearchStatus, Status, Updates } from './types';
 import { APP_NAME, RANGES, SET_UP, defaults, megabytes, plural, post, request, searchable, settingUp, typeLabel } from './types';
 import { Progress } from './Progress';
 import { searchWork } from './Activity';
@@ -52,6 +52,40 @@ function Select({ label, value, onChange, disabled, children }: { label: string;
   return <div className="select"><select aria-label={label} value={value} disabled={disabled} onChange={e => onChange(e.target.value)}>{children}</select><ChevronDown /></div>;
 }
 
+/** The filters a Lightroom catalog or a Photos library adds: rating, picks (favorites), keyword, and collection (album). A remembered
+ *  choice that no longer exists stays listed, so the panel never misstates what is applied. */
+function CatalogFilters({ facets, draft, onChange }: { facets: CatalogFacets; draft: Filters; onChange: (filters: Filters) => void }) {
+  const photos = facets.kind === 'bundle';
+  const named = (list: { name: string; count: number }[], value: string) => [...(value && !list.some(item => item.name === value) ? [<option key="gone" value={value}>{value} · no images</option>] : []),
+    ...list.map(item => <option key={item.name} value={item.name}>{item.name} · {item.count.toLocaleString()}</option>)];
+  return <>
+    {!photos && <fieldset className="field"><legend>Rating</legend>
+      <Select label="Rating" value={String(draft.rating)} onChange={rating => onChange({ ...draft, rating: Number(rating) })}>
+        <option value="0">Any rating</option>
+        {facets.ratings.map(r => <option key={r.rating} value={r.rating}>{r.rating === 5 ? '5 stars' : `${r.rating}+ stars`} · {r.count.toLocaleString()}</option>)}
+      </Select>
+    </fieldset>}
+    <fieldset className="field"><legend>{photos ? 'Favorites' : 'Picks'}</legend>
+      <Select label={photos ? 'Favorites' : 'Picks'} value={draft.picks ? 'picks' : ''} onChange={value => onChange({ ...draft, picks: value === 'picks' })}>
+        <option value="">{photos ? 'All photos' : 'All, flagged or not'}</option>
+        <option value="picks">{photos ? 'Favorites only' : 'Picks only'} · {facets.picks.toLocaleString()}</option>
+      </Select>
+    </fieldset>
+    {!photos && <fieldset className="field"><legend>Keyword</legend>
+      <Select label="Keyword" value={draft.keyword} onChange={keyword => onChange({ ...draft, keyword })}>
+        <option value="">{facets.keywords.length ? 'All keywords' : 'No keywords'}</option>
+        {named(facets.keywords, draft.keyword)}
+      </Select>
+    </fieldset>}
+    <fieldset className="field"><legend>{photos ? 'Album' : 'Collection'}</legend>
+      <Select label={photos ? 'Album' : 'Collection'} value={draft.collection} onChange={collection => onChange({ ...draft, collection })}>
+        <option value="">{facets.collections.length ? (photos ? 'All albums' : 'All collections') : (photos ? 'No albums' : 'No collections')}</option>
+        {named(facets.collections, draft.collection)}
+      </Select>
+    </fieldset>
+  </>;
+}
+
 export function FilterPanel({ filters, anchor, onApply, onClose }: { filters: Filters; anchor: HTMLElement | null; onApply: (filters: Filters) => void; onClose: () => void }) {
   const [draft, setDraft] = useState(filters);
   const [facets, setFacets] = useState<Facets | null>(null);
@@ -78,6 +112,7 @@ export function FilterPanel({ filters, anchor, onApply, onClose }: { filters: Fi
         {types.map(t => <option key={t.mime} value={t.mime}>{typeLabel(t.mime)} · {t.count.toLocaleString()}</option>)}
       </Select>
     </fieldset>
+    {facets?.catalog && <CatalogFilters facets={facets.catalog} draft={draft} onChange={setDraft} />}
     <fieldset className="field"><legend>Date</legend>
       <Select label="Date" value={draft.range} onChange={range => setDraft({ ...draft, range: range as Range })}>{RANGES.map(({ range, label }) => <option key={range} value={range}>{label}</option>)}</Select>
       {draft.range === 'custom' && <div className="date-inputs"><label><span>From</span><input aria-label="From date" type="date" value={draft.from} max={draft.to || undefined} onChange={e => setDraft({ ...draft, from: e.target.value })} /></label><label><span>To</span><input aria-label="To date" type="date" value={draft.to} min={draft.from || undefined} onChange={e => setDraft({ ...draft, to: e.target.value })} /></label></div>}
@@ -113,13 +148,16 @@ export function LibraryPanel({ status, shown, narrowed, scanLeft, searchLeft, an
   const unsupported = [raw && plural(raw, 'RAW photo'), videos && plural(videos, 'video')].filter(Boolean).join(' and ');
   return <Panel title="Info" anchor={anchor} onClose={onClose}>
     <p className="path">{status.folder!.label}</p>
-    <p>{status.folder!.photos ? 'Read through Photos, with your edits. Hidden photos are skipped, and your library is never changed.' : 'Subfolders included, hidden ones skipped. Your files are never changed.'}</p>
+    <p>{status.folder!.kind === 'catalog' ? 'Read from a copy of the catalog, which Lightroom never sees. Virtual copies are skipped, and your catalog is never changed.' : status.folder!.kind === 'bundle' ? 'Read as files from a copy of the library’s database. Hidden and deleted photos are skipped, and your library is never changed.' : status.folder!.photos ? 'Read through Photos, with your edits. Hidden photos are skipped, and your library is never changed.' : 'Subfolders included, hidden ones skipped. Your files are never changed.'}</p>
     <dl className="counts">
       {ledger.length > 1 && ledger.map(row => <Fragment key={row.label}><dt>{row.label}</dt><dd>{row.value < 0 ? `− ${(-row.value).toLocaleString()}` : row.value.toLocaleString()}</dd></Fragment>)}
       <dt className={ledger.length > 1 ? 'total' : undefined}>{totalLabel}</dt><dd className={ledger.length > 1 ? 'total' : undefined}>{(counts.images - counts.nearDuplicates).toLocaleString()}</dd>
     </dl>
     {shown !== null && <p>{plural(shown, 'image')} shown with your filters.</p>}
+    {library.notice && <p>{library.notice}</p>}
+    {!!library.fromPreview && <p>{plural(library.fromPreview, 'file')} {library.fromPreview === 1 ? 'is' : 'are'} shown from Lightroom’s previews, because the originals aren’t on this computer. If the drive has another name here, start Orchard with --path-map OLD=NEW.</p>}
     {unsupported && <p>{unsupported} {raw + videos === 1 ? 'isn’t' : 'aren’t'} shown yet.</p>}
+    {status.folder!.kind === 'bundle' && !!counts.unreadable && <p>Photos kept only in iCloud can’t be read from the library’s files.</p>}
     {status.folder!.photos && !!counts.unreadable && <p>Photos kept only in iCloud can’t be read. To include them, choose Download Originals to this Mac in Photos › Settings › iCloud.</p>}
     {!!library.photoLibraries.length && <p>{library.photoLibraries.length === 1 ? 'The Photos library here is' : 'The Photos libraries here are'} skipped in this folder. {status.photos ? 'To see your Photos library, choose Photos library under the folder name.' : 'Export photos to a folder to include them.'}</p>}
     {!!library.unlistedFolders && <p>{plural(library.unlistedFolders, 'folder')} could not be opened. Check their permissions.</p>}

@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import urllib.request
 import webbrowser
 
-from server import photos
+from server import catalog, photos
 from server.diagnostics import LAST_ERROR, report
 from server.library import IMAGE_ID, Library
 from server.semantic import Encoder
@@ -57,9 +57,22 @@ def default_data_dir() -> Path:
     return Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share') / APP['slug']
 
 
+def system_library(path: Path) -> bool:
+    """Whether a path is the Mac's System Photo Library and this Mac can read it through Photos, which is how it is read."""
+    return photos.is_library(path) and path == photos.LIBRARY and photos.available()
+
+
 def reachable(path: str) -> bool:
-    """Whether a remembered folder can be opened now. The Photos library opens through Photos, not as a folder."""
-    return photos.available() if photos.is_library(Path(path)) else Path(path).is_dir()
+    """Whether a remembered folder, catalog or Photos library can be opened now."""
+    path = Path(path)
+    if system_library(path):
+        return True
+    return path.is_file() if catalog.is_catalog(path) else path.is_dir()
+
+
+def label(path: Path) -> str:
+    """What a remembered folder is called in the list: the Photos library by its name, the rest by their path."""
+    return photos.NAME if system_library(path) else tilde(path)
 
 
 def tilde(path: Path) -> str:
@@ -71,8 +84,10 @@ def tilde(path: Path) -> str:
 
 
 class App:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, path_map=()):
         self.data_dir = Path(data_dir).resolve()
+        # Where a Lightroom catalog's folders are on this computer, as OLD=NEW pairs.
+        self.path_map = catalog.parse_path_map(path_map)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.encoder = Encoder(self.data_dir / 'models')
         self.recent_path = self.data_dir / 'recent.json'
@@ -87,16 +102,20 @@ class App:
         if not text:
             raise ValueError('Enter the path of a folder.')
         path = Path(text).expanduser()
-        if photos.is_library(path):
-            return self.photos_library(path)
+        if system_library(path):
+            return path
         if not path.is_absolute():
             raise ValueError('Enter a full path, like C:\\Users\\you\\Pictures.' if sys.platform == 'win32' else 'Enter a full path, starting with / or ~.')
         try:
             path = path.resolve(strict=True)
         except (OSError, RuntimeError):
             raise ValueError(f'{text} does not exist.') from None
+        if catalog.is_catalog(path):
+            return self.catalog(path, text)
         if not path.is_dir():
             raise ValueError(f'{text} is a file. Choose the folder that contains it.')
+        if photos.is_library(path):
+            return self.bundle(path, text)
         if not os.access(path, os.R_OK | os.X_OK):
             raise ValueError(f'{text} cannot be read. Check its permissions.')
         if path == self.data_dir or self.data_dir in path.parents:
@@ -104,13 +123,21 @@ class App:
         return path
 
     @staticmethod
-    def photos_library(path: Path) -> Path:
-        """The System Photo Library, the one Photos library Orchard can read, by the name Orchard keeps for it."""
-        if not photos.available():
-            raise ValueError('Only a Mac can open a Photos library. Export the photos to a folder instead.')
-        if path != photos.LIBRARY:
-            raise ValueError(f'{APP["name"]} can only open the library Photos uses as its System Photo Library. Choose '
-                             'Photos library instead, or make this one the System Photo Library in Photos › Settings.')
+    def catalog(path: Path, text: str) -> Path:
+        """A Lightroom Classic catalog, which opens like a folder. It is never opened itself, only a copy of it."""
+        if not path.is_file():
+            raise ValueError(f'{text} is not a catalog file.')
+        if not os.access(path, os.R_OK):
+            raise ValueError(f'{text} cannot be read. Check its permissions.')
+        return path
+
+    @staticmethod
+    def bundle(path: Path, text: str) -> Path:
+        """A Photos library bundle other than the Mac's System Photo Library, read as files from a copy of its database."""
+        if not (path / 'database' / 'Photos.sqlite').is_file():
+            raise ValueError(f'{text} has no database/Photos.sqlite, so it is not a Photos library Orchard can read.')
+        if not os.access(path / 'database' / 'Photos.sqlite', os.R_OK):
+            raise ValueError(f'{text} cannot be read. Check its permissions.')
         return path
 
     def open(self, value) -> Library:
@@ -122,7 +149,7 @@ class App:
             if self.library:
                 self.library.close()
             key = hashlib.sha256(str(folder).encode()).hexdigest()[:16]
-            library = self.library = Library(folder, self.data_dir / 'libraries' / key, self.encoder)
+            library = self.library = Library(folder, self.data_dir / 'libraries' / key, self.encoder, self.path_map)
             self.remember(folder)
         threading.Thread(target=library.scan, daemon=True).start()
         return library
@@ -179,16 +206,16 @@ class App:
 
     def status(self):
         library = self.library
-        recent = [{'path': path, 'label': photos.NAME if photos.is_library(Path(path)) else tilde(Path(path)), 'available': reachable(path)}
+        recent = [{'path': path, 'label': label(Path(path)), 'available': reachable(path)}
                   for path in self.recent() if not library or path != str(library.folder)]
         result = {'app': APP['name'], 'version': APP['version'], 'platform': sys.platform, 'picker': self.window is not None or picker_command(None) is not None, 'recent': recent, 'folder': None, 'library': None,
                   'photos': str(photos.LIBRARY) if photos.available() else None,
                   'model': {'present': self.encoder.downloaded() or self.encoder.activity is not None,
                             'size': self.encoder.size}}
         if library:
-            result['folder'] = {'path': str(library.folder), 'id': library.directory.name, 'photos': library.photos,
+            result['folder'] = {'path': str(library.folder), 'id': library.directory.name, 'photos': library.photos, 'kind': library.kind,
                                 **({'label': photos.NAME, 'name': photos.NAME} if library.photos else
-                                   {'label': tilde(library.folder), 'name': library.folder.name or str(library.folder)})}
+                                   {'label': tilde(library.folder), 'name': library.folder.stem if library.kind != 'folder' else library.folder.name or str(library.folder)})}
             result['library'] = library.status()
         return result
 
@@ -494,6 +521,8 @@ def arguments(argv=None):
     parser.add_argument('folder', nargs='?', help='folder to show; defaults to the last one opened')
     parser.add_argument('--port', type=int, default=APP['port'])
     parser.add_argument('--data-dir', type=Path, default=default_data_dir())
+    parser.add_argument('--path-map', action='append', default=[], metavar='OLD=NEW',
+                        help='where a Lightroom catalog\'s folders are on this computer, like /Volumes/Photos=/mnt/photos; repeat for more')
     parser.add_argument('--no-watch', action='store_true', help='scan only on request, not every minute')
     # The launcher passes --window first, so a --browser after it wins.
     parser.add_argument('--window', dest='show', action='store_const', const='window', help='open in its own window')
@@ -538,7 +567,10 @@ def main(argv=None):
     if args.show == 'window' and (reason := unavailable()):
         print(f'{APP["name"]} is opening in the browser, because {reason}', flush=True)
         args.show = 'browser'
-    app = server.app = App(args.data_dir)
+    try:
+        app = server.app = App(args.data_dir, args.path_map)
+    except ValueError as error:
+        sys.exit(str(error))
     try:
         if folder:
             app.open(folder)
