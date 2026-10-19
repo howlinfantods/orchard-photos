@@ -6,10 +6,13 @@ import logging
 import os
 from pathlib import Path
 import platform
+import shutil
 import sys
 import threading
+import time
 
-from server.cache import connect, thumbnail_path
+from server import video
+from server.cache import connect, frames_path, thumbnail_path
 
 # The embedding space. Vectors are stored under this key, so vectors from another model are never mixed with its own.
 MODEL = "google/siglip2-base-patch16-256"
@@ -52,6 +55,15 @@ PAD = "<pad>"
 BATCH_SIZE = 16  # Also the Core ML model's fixed batch.
 DEPENDENCIES_MISSING = "Visual search needs its Python dependencies. Run the setup command and retry."
 logger = logging.getLogger(__name__)
+
+
+class Hit(tuple):
+    """A search result, (image id, score). A video's also says `t`, the time in seconds of the segment that matched best."""
+
+    def __new__(cls, image_id, score, t=None):
+        hit = super().__new__(cls, (image_id, score))
+        hit.t = t
+        return hit
 
 
 class Encoder:
@@ -332,9 +344,12 @@ def parity_pixels():
 class SemanticIndex:
     """The embeddings of one folder's images, stored next to its library."""
 
-    def __init__(self, directory: Path, encoder: Encoder):
+    def __init__(self, directory: Path, encoder: Encoder, originals=None):
         self.directory = Path(directory)
         self.encoder = encoder
+        # Finds the file of an image by its id. Videos are read from it when they are prepared.
+        self.originals = originals
+        self._clips = None
         self._index_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._state = "idle"
@@ -351,6 +366,7 @@ class SemanticIndex:
                     PRIMARY KEY (image_id, model)
                 )
             """)
+            connection.executescript(video.SCHEMA)
 
     def _set_state(self, state, error=None):
         with self._state_lock:
@@ -410,6 +426,7 @@ class SemanticIndex:
     def discard_other_models(self):
         with connect(self.directory) as connection:
             connection.execute("DELETE FROM semantic_embeddings WHERE model != ?", (MODEL,))
+            connection.execute("DELETE FROM video_segments WHERE model != ?", (MODEL,))
 
     def _open_image(self, image_id):
         from PIL import Image
@@ -430,8 +447,11 @@ class SemanticIndex:
                         DELETE FROM semantic_embeddings WHERE image_id NOT IN (SELECT id FROM images)
                     """)
                     pending = [image_id for image_id in self._pending(connection) if image_id not in unreadable]
+                    videos = {row[0] for row in connection.execute("SELECT image_id FROM videos")}
                 if not pending:
                     break
+                clips = [image_id for image_id in pending if image_id in videos]
+                pending = [image_id for image_id in pending if image_id not in videos]
                 self.encoder.load()
                 self._set_state("indexing")
                 for offset in range(0, len(pending), BATCH_SIZE):
@@ -458,6 +478,17 @@ class SemanticIndex:
                     finally:
                         for image in images:
                             image.close()
+                for image_id in clips:
+                    if cancelled():
+                        self._set_state("idle")
+                        return
+                    try:
+                        if not self._index_video(image_id, cancelled):
+                            self._set_state("idle")
+                            return
+                    except (video.VideoError, OSError, ValueError) as error:
+                        unreadable.add(image_id)
+                        logger.warning("Could not read video %s for visual search: %s", image_id, error)
             self._unreadable = frozenset(unreadable)
             failed = len(unreadable)
             self._set_state("idle", f"{failed} {'image' if failed == 1 else 'images'} could not be read for visual search." if failed else None)
@@ -466,6 +497,109 @@ class SemanticIndex:
             self._set_state("error", str(error))
         finally:
             self._index_lock.release()
+
+    def _index_video(self, image_id, cancelled) -> bool:
+        """Embed a video's keyframes, merge alike ones into segments, and store them, with the frame nearest the mean as
+        the video's thumbnail and the mean as its vector. Returns False if cancelled partway."""
+        import io
+
+        from PIL import Image
+
+        from server.groups import crispness
+
+        started = time.monotonic()
+        path = self.originals(image_id) if self.originals else None
+        if path is None or not path.is_file():
+            raise OSError("The video is no longer there.")
+        info = video.probe(path)
+        slog3 = video.is_slog3(path)
+        lut, unnormalized = video.log_lut(slog3)
+
+        def pack(image):
+            data = io.BytesIO()
+            image.save(data, "WEBP", quality=80)
+            return data.getvalue()
+        segments = video.Segments(pack=pack)
+        batch = []
+
+        def embed():
+            vectors = self.encoder.features(images=[image for _, image in batch])
+            for (t, image), vector in zip(batch, vectors):
+                segments.add(t, vector, crispness(image), image)
+            batch.clear()
+        candidates = 0
+        frames = video.keyframes(path, info["duration"], lut)
+        try:
+            for t, image in frames:
+                batch.append((t, image))
+                candidates += 1
+                if len(batch) == BATCH_SIZE:
+                    embed()
+                    if cancelled():
+                        return False
+        finally:
+            frames.close()
+        if candidates < video.MIN_FRAMES:
+            # Nothing was embedded yet, since the batch holds more than that. Add frames from evenly spaced seeks.
+            for t in video.seeks(info["duration"], [t for t, _ in batch]):
+                try:
+                    batch.append((t, video.grab(path, t, video.FRAME_EDGE, lut)))
+                except video.VideoError:
+                    continue
+            batch.sort(key=lambda frame: frame[0])
+            candidates = len(batch)
+        if batch:
+            embed()
+        found = segments.result()
+        if not found:
+            raise video.VideoError(video.NOT_A_VIDEO)
+        mean = segments.mean()
+        centre = video.central(found, mean)
+        try:
+            thumbnail = video.grab(path, found[centre]["t_frame"], 720, lut)
+        except video.VideoError:
+            thumbnail = Image.open(io.BytesIO(found[centre]["image"])).convert("RGB")
+        folder = frames_path(self.directory, image_id)
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True)
+        for place, segment in enumerate(found):
+            (folder / f"{place}.webp").write_bytes(segment["image"])
+        video.save(thumbnail, thumbnail_path(self.directory, image_id))
+        with connect(self.directory) as connection:
+            connection.execute("DELETE FROM video_segments WHERE image_id = ?", (image_id,))
+            connection.executemany(
+                "INSERT INTO video_segments VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(image_id, MODEL, place, segment["t_start"], segment["t_end"], segment["t_frame"], segment["vector"].astype("<f4").tobytes())
+                 for place, segment in enumerate(found)])
+            connection.execute("UPDATE videos SET log_unnormalized = ? WHERE image_id = ?", (int(unnormalized), image_id))
+            connection.execute("INSERT OR REPLACE INTO semantic_embeddings VALUES (?, ?, ?)", (image_id, MODEL, mean.astype("<f4").tobytes()))
+        logger.info("Indexed video %s: %d frames, %d segments, %.1f s", image_id[:8], candidates, len(found), time.monotonic() - started)
+        return True
+
+    def segments(self, ids):
+        """The segments of the indexed videos among `ids`, as (their positions in ids, where each one's segments start in
+        the arrays, the segment vectors, their frame times, each video's span of segments), or None without videos."""
+        import numpy
+
+        with connect(self.directory) as connection:
+            version = connection.execute("SELECT COUNT(*), MAX(rowid) FROM video_segments WHERE model = ?", (MODEL,)).fetchone()
+            cached = self._clips
+            if cached and cached[0] == version and cached[1] is ids:
+                return cached[2]
+            rows = connection.execute("SELECT image_id, t_frame, vector FROM video_segments WHERE model = ? ORDER BY image_id, idx",
+                                      (MODEL,)).fetchall()
+        position = {image_id: place for place, image_id in enumerate(ids)}
+        rows = [row for row in rows if row[0] in position]
+        result = None
+        if rows:
+            owners = [position[row[0]] for row in rows]
+            starts = [place for place in range(len(rows)) if place == 0 or owners[place] != owners[place - 1]]
+            ends = starts[1:] + [len(rows)]
+            result = (numpy.array([owners[place] for place in starts]), numpy.array(starts),
+                      numpy.stack([numpy.frombuffer(row[2], dtype="<f4") for row in rows]),
+                      numpy.array([row[1] for row in rows]), {owners[start]: (start, end) for start, end in zip(starts, ends)})
+        self._clips = (version, ids, result)
+        return result
 
     def embeddings(self):
         """Return (ids, matrix) for indexed images, reloading only when the embeddings table changed."""
@@ -526,6 +660,19 @@ class SemanticIndex:
             self._set_state("error", str(error))
             raise
         scores = matrix @ query
+        clips = self.segments(ids)
+        if clips is not None:
+            # A video scores as its best segment.
+            rows, starts, vectors, times, spans = clips
+            segment_scores = vectors @ query
+            scores[rows] = numpy.maximum.reduceat(segment_scores, starts)
         order = numpy.argsort(-scores, kind="stable")
         order = order[scores[order] >= (TEXT_MATCH if text.strip() else IMAGE_MATCH)]
-        return [(ids[index], float(scores[index])) for index in order]
+        hits = []
+        for index in order:
+            if clips is not None and index in spans:
+                start, end = spans[index]
+                hits.append(Hit(ids[index], float(scores[index]), float(times[start + numpy.argmax(segment_scores[start:end])])))
+            else:
+                hits.append((ids[index], float(scores[index])))
+        return hits

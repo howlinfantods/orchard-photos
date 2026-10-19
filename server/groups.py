@@ -87,7 +87,12 @@ def gather(matrix, related=(), alike=None) -> numpy.ndarray:
 def sharpness(path: Path) -> float:
     """Variance of the Laplacian: high for crisp edges, low for blur and camera shake."""
     with Image.open(path) as image:
-        grey = image.convert('L')
+        return crispness(image)
+
+
+def crispness(image: Image.Image) -> float:
+    """The variance of the Laplacian of an open image."""
+    grey = image.convert('L')
     scale = SHARPNESS_EDGE / max(grey.size)
     grey = grey.resize((max(3, round(grey.width * scale)), max(3, round(grey.height * scale))), Image.Resampling.BILINEAR)
     pixels = numpy.asarray(grey, dtype=numpy.float32)

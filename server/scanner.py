@@ -10,6 +10,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+import shutil
 import sys
 import threading
 import time
@@ -17,7 +18,8 @@ import warnings
 
 from PIL import ExifTags, Image, ImageOps, UnidentifiedImageError
 
-from server.cache import connect, preview_path, thumbnail_path, while_open
+from server import video
+from server.cache import connect, frames_path, preview_path, thumbnail_path, while_open
 
 try:
     from pillow_heif import register_heif_opener
@@ -27,7 +29,7 @@ except ImportError:
 
 EXTENSIONS = {'.jpg', '.jpeg', '.jpe', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.avif'}
 # Photos and videos in formats the scanner can't read. They are only counted, so a folder of them doesn't look empty
-# for no reason.
+# for no reason. Videos are read when ffmpeg is installed; until then they are counted like these.
 RAW = {'.3fr', '.arw', '.cr2', '.cr3', '.crw', '.dcr', '.dng', '.erf', '.fff', '.iiq', '.kdc', '.mef', '.mos', '.mrw',
        '.nef', '.nrw', '.orf', '.pef', '.raf', '.raw', '.rw2', '.rwl', '.sr2', '.srf', '.srw', '.x3f'}
 VIDEO = {'.3gp', '.avi', '.flv', '.m2ts', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg', '.mts', '.webm', '.wmv'}
@@ -73,10 +75,10 @@ class OnlyInCloud(OSError):
     """A photo whose original is in iCloud, not on this computer."""
 
 
-def walk(root: Path, skip=frozenset(), found=None):
+def walk(root: Path, skip=frozenset(), found=None, videos=False):
     """Every image file below root as (relative posix path, stat), the folders that could not be listed, the Photos
     libraries passed over, and how many RAW and video files were skipped. `found` hears the running count of image
-    files.
+    files. With `videos`, video files are listed as images are, and not skipped.
 
     Hidden entries are skipped, and so are Photos libraries, which macOS keeps closed to other apps. Symlinked folders
     are followed once each, after the real folders, so a link loop ends and a folder reached both ways keeps its real
@@ -105,7 +107,7 @@ def walk(root: Path, skip=frozenset(), found=None):
                             (links if entry.is_symlink() else stack).append((child, entry.path))
                         elif entry.is_file():
                             extension = os.path.splitext(entry.name)[1].lower()
-                            if extension in EXTENSIONS:
+                            if extension in EXTENSIONS or (videos and extension in video.EXTENSIONS):
                                 files.append((child, entry.stat()))
                                 if found and len(files) % FOUND_EVERY == 0:
                                     found(len(files))
@@ -134,7 +136,7 @@ class Folder:
     def list(self, found=None):
         """Every image as (path, folder, size, mtime_ns), with walk's unreadable folders, Photos libraries and
         skipped counts."""
-        files, unreadable, libraries, skipped = walk(self.root, self.skip, found)
+        files, unreadable, libraries, skipped = walk(self.root, self.skip, found, video.available())
         if '' in unreadable:
             raise FolderUnavailable(f'{self.root} could not be read. Check its permissions, or choose another folder.')
         entries = [(path, path.rpartition('/')[0], status.st_size, status.st_mtime_ns) for path, status in files]
@@ -231,6 +233,8 @@ def scaled(image, edge: int):
 
 
 def failure(error: Exception) -> str:
+    if isinstance(error, video.VideoError):
+        return str(error)
     if isinstance(error, OnlyInCloud):
         return 'Only in iCloud'
     if isinstance(error, Image.DecompressionBombError):
@@ -269,7 +273,7 @@ class Scanner:
                 );
                 CREATE INDEX IF NOT EXISTS file_image ON files(image_id);
                 CREATE INDEX IF NOT EXISTS file_folder ON files(folder);
-            ''')
+            ''' + video.SCHEMA)
 
     def scan(self, progress=None, committed=None, cancelled=lambda: False):
         """Bring the index in line with the source. Unchanged files are recognised by size and modification time."""
@@ -298,6 +302,9 @@ class Scanner:
                             db.execute('INSERT OR IGNORE INTO images VALUES (?,?,?,?,?,?,?)',
                                        (result['id'], result['width'], result['height'], result['mime'],
                                         size, result['taken'], result['camera']))
+                            if 'video' in result:
+                                db.execute('INSERT OR IGNORE INTO videos (image_id, duration, codec, transfer, log_slog3, log_unnormalized) '
+                                           'VALUES (?,?,?,?,?,?)', (result['id'], *result['video']))
                         modified = utc(datetime.fromtimestamp(mtime_ns / 1e9, UTC))
                         db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?)',
                                    (path, folder, result.get('id') if 'error' not in result else None,
@@ -328,6 +335,8 @@ class Scanner:
         try:
             if size == 0:
                 return {'error': 'Empty file'}
+            if os.path.splitext(relative)[1].lower() in video.EXTENSIONS:
+                return self._examine_video(relative, size)
             with self.source.open(relative) as stream:
                 digest = hashlib.file_digest(stream, 'sha256').hexdigest()
                 if digest in self._seen:
@@ -337,6 +346,31 @@ class Scanner:
         except Exception as error:
             logger.info('Could not read %s: %s', relative, error)
             return {'error': failure(error)}
+
+    def _examine_video(self, relative: str, size: int) -> dict:
+        """Name a video by samples of its file and, if it is new, read its metadata and draw a first thumbnail from its
+        middle. The segments and the final thumbnail come when its frames are embedded."""
+        with self.source.open(relative) as stream:
+            digest = video.video_id(stream, size)
+        if digest in self._seen:
+            return {'id': digest}
+        started = time.monotonic()
+        path = self.source.file(relative)
+        info = video.probe(path)
+        slog3 = video.is_slog3(path)
+        lut, unnormalized = video.log_lut(slog3)
+        duration = info['duration']
+        try:
+            frame = video.grab(path, video.thumbnail_time(duration), THUMBNAIL_SIZE, lut, threads=2)
+        except video.VideoError:
+            frame = video.grab(path, 0, THUMBNAIL_SIZE, lut, threads=2)
+        self.save_thumbnail(frame, digest)
+        logger.info('Read video %s in %.1f s', digest[:8], time.monotonic() - started)
+        return {'id': digest, 'width': info['width'], 'height': info['height'], 'mime': video.mime(relative), 'taken': info['taken'],
+                'camera': info['camera'], 'video': (duration, info['codec'], info['transfer'], int(slog3), int(unnormalized))}
+
+    def save_thumbnail(self, display, digest: str):
+        video.save(display, thumbnail_path(self.directory, digest))
 
     def _describe(self, stream, digest: str) -> dict:
         """Read a new image's metadata and draw its thumbnail."""
@@ -366,7 +400,10 @@ class Scanner:
             orphans = [image_id for (image_id,) in db.execute(
                 'SELECT id FROM images WHERE id NOT IN (SELECT image_id FROM files WHERE image_id IS NOT NULL)')]
             db.executemany('DELETE FROM images WHERE id=?', [(image_id,) for image_id in orphans])
+            for table in ('videos', 'video_segments'):
+                db.executemany(f'DELETE FROM {table} WHERE image_id=?', [(image_id,) for image_id in orphans])
         for image_id in orphans:
             for path in (thumbnail_path(self.directory, image_id), preview_path(self.directory, image_id)):
                 while_open(path.unlink, missing_ok=True)
+            shutil.rmtree(frames_path(self.directory, image_id), ignore_errors=True)
         return len(gone)

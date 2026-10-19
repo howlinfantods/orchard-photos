@@ -259,6 +259,25 @@ def open_browser(url: str):
         print(f'No web browser was found. Open {url} in one.', flush=True)
 
 
+def byte_range(header: str, size: int):
+    """The (first, last) bytes a Range header asks for, 'whole' when it is not a single byte range this can answer
+    (the whole file is sent then, as the standard allows), or None when the range lies past the end."""
+    found = re.fullmatch(r'bytes=(\d*)-(\d*)', header.strip())
+    if not found or not any(found.groups()):
+        return 'whole'
+    first, last = found.groups()
+    if not first:
+        # The final bytes of the file.
+        count = int(last)
+        return None if count == 0 or size == 0 else (max(0, size - count), size - 1)
+    first = int(first)
+    if last and int(last) < first:
+        return 'whole'
+    if first >= size:
+        return None
+    return first, min(int(last), size - 1) if last else size - 1
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -408,7 +427,11 @@ class Handler(BaseHTTPRequestHandler):
         library, image_id = self.app.current(), parts[0]
         action = parts[1] if len(parts) == 2 else None
         if action == 'thumbnail' and not post:
-            self.file(library.thumbnail(image_id), mime='image/webp')
+            # A video's first thumbnail is replaced when its frames are prepared, so browsers may not keep it.
+            self.file(library.thumbnail(image_id), mime='image/webp', cache='no-store' if library.provisional(image_id) else IMMUTABLE)
+            return
+        if len(parts) == 3 and parts[1] == 'frame' and parts[2].isdecimal() and not post:
+            self.file(library.frame(image_id, int(parts[2])), mime='image/webp')
             return
         details = library.details(image_id)
         if not details:
@@ -426,7 +449,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('This file is no longer there. Rescan to refresh.')
             reveal(path)
             self.json({'revealed': True})
-        elif action == 'display' and not post:
+        elif action == 'display' and not post and details['kind'] != 'video':
             path = library.display(image_id)
             self.file(path, mime=details['mime'] if not details['preview'] else 'image/jpeg')
         elif action == 'original' and not post:
@@ -439,17 +462,37 @@ class Handler(BaseHTTPRequestHandler):
         if not path or not path.is_file():
             self.json({'error': 'This image is no longer available. Rescan the folder to refresh.'}, 404)
             return
-        self.send_response(200)
+        size = path.stat().st_size
+        start, end = 0, size - 1
+        requested = self.headers.get('Range')
+        if requested:
+            span = byte_range(requested, size)
+            if span is None:
+                self.send_response(416)
+                self.send_header('Content-Range', f'bytes */{size}')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            if span != 'whole':
+                start, end = span
+        partial = (start, end) != (0, size - 1)
+        self.send_response(206 if partial else 200)
         self.send_header('Content-Type', mime or mimetypes.guess_type(path)[0] or 'application/octet-stream')
-        self.send_header('Content-Length', str(path.stat().st_size))
+        self.send_header('Content-Length', str(end - start + 1))
+        self.send_header('Accept-Ranges', 'bytes')
+        if partial:
+            self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
         self.send_header('Cache-Control', cache)
         if download:
             fallback = re.sub(r'[^A-Za-z0-9._-]', '_', path.name)
             self.send_header('Content-Disposition', f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(path.name)}")
         self.end_headers()
         with path.open('rb') as stream:
-            while chunk := stream.read(256 * 1024):
+            stream.seek(start)
+            left = end - start + 1
+            while left > 0 and (chunk := stream.read(min(256 * 1024, left))):
                 self.wfile.write(chunk)
+                left -= len(chunk)
 
 
 class Server(ThreadingHTTPServer):

@@ -66,7 +66,9 @@ class ScannerTests(unittest.TestCase):
         for name in ('a/IMG_1.CR3', 'a/IMG_2.nef', 'DSC_3.dng', 'clip.MOV', 'b/film.mp4', '.hidden/raw.arw'):
             (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             (self.root / name).write_bytes(b'not decoded')
-        stats = self.scanner.scan()
+        # Without ffmpeg, videos are only counted.
+        with patch('server.video.which', return_value=None):
+            stats = self.scanner.scan()
         self.assertEqual(set(self.files()), {'kept.jpg'})
         self.assertEqual(stats['unreadable'], 0)
         self.assertEqual(stats['skipped'], {'raw': 3, 'video': 2})
